@@ -33,6 +33,8 @@ SQL-Generator/
 
 正在编辑中的探索 notebook 可以暂时留在根目录。准备共享或提交时，建议移动到 `notebooks/`。
 
+`src/` 里的 `.py` 文件目前是 starter template：里面只有每个成员负责的函数入口和 TODO，不是最终实现。大家可以在对应文件里继续补代码，也可以根据实际实验需要调整函数名称和结构。
+
 ## 小组分工
 
 ### Member 1: Dataset and Data Processing（约 20%）
@@ -141,8 +143,76 @@ SQL-Generator/
 - 修改所有章节
 - PPT 和最终 presentation
 
+## GitHub 协作流程
+
+如果你第一次参与这个项目，请先把仓库下载到自己电脑：
+
+```bash
+git clone https://github.com/MasterpieceXu/SQL-Prompt-Generation-from-Natural-Language-Queries.git
+cd SQL-Prompt-Generation-from-Natural-Language-Queries
+```
+
+安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+每次开始写代码前，先拉取最新版本，避免和别人代码冲突：
+
+```bash
+git pull
+```
+
+修改完成后，先查看自己改了哪些文件：
+
+```bash
+git status
+```
+
+把需要提交的文件加入暂存区：
+
+```bash
+git add path/to/your_file.py
+```
+
+例如：
+
+```bash
+git add src/data_prepare.py
+git add notebooks/data_analysis.ipynb
+```
+
+提交改动：
+
+```bash
+git commit -m "briefly describe your change"
+```
+
+例如：
+
+```bash
+git commit -m "add dataset cleaning analysis"
+```
+
+推送到 GitHub：
+
+```bash
+git push
+```
+
+日常流程可以简单记成：
+
+```text
+第一次：git clone
+每次开始前：git pull
+写完以后：git status -> git add -> git commit -> git push
+```
+
 ## 协作规则
 
+- 每个人优先修改自己负责的文件，减少 merge conflict。
+- 如果需要修改别人负责的文件，请先在群里说明。
 - 如果新增第三方 Python 库，请同时更新 `requirements.txt`。
 - 不要提交大型模型文件、下载的数据集或生成的 checkpoint。`checkpoints/` 只用于本地训练输出。
 - 可复用代码放在 `src/`。探索、分析和画图可以先放在 notebook。
