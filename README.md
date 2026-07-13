@@ -211,6 +211,9 @@ git push
 
 ## 协作规则
 
+- 如果使用 AI 辅助写代码，请先让 AI 阅读 `README.md`，并明确告诉 AI 自己负责的 member 和文件范围。
+- 使用 AI 时，默认只修改自己负责的文件；如果确实需要修改其他成员的文件，请先在群里说明。
+- push 前一定要检查 `git status`，确认没有把本地探索 notebook、checkpoint、大文件或无关文件一起提交。
 - 每个人优先修改自己负责的文件，减少 merge conflict。
 - 如果需要修改别人负责的文件，请先在群里说明。
 - 如果新增第三方 Python 库，请同时更新 `requirements.txt`。
