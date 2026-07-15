@@ -44,7 +44,7 @@ SQL-Generator/
 | 参数 | 当前值 | 作用 |
 |---|---:|---|
 | `RANDOM_SEED` | `42` | 控制 train / validation / test 的可复现划分 |
-| `MAX_INPUT_LENGTH` | `1024` | prompt 的最大 token 长度，过长部分会被截断 |
+| `MAX_INPUT_LENGTH` | `512` | prompt 的最大 token 长度，过长部分会被截断，基于T5-small，选择最大512输入|
 | `MAX_TARGET_LENGTH` | `256` | SQL target 的最大 token 长度，过长部分会被截断 |
 | `DATASET_PATH` | `hf://datasets/AI4DS/sql_generator_no_cot/training_no_cot_dataset.csv` | Hugging Face 数据集路径 |
 | `BASELINE_MODEL_NAME` | `t5-small` | 用于加载 tokenizer 的 baseline 模型 |
