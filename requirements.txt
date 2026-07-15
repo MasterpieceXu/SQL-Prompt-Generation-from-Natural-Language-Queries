@@ -1,8 +1,10 @@
 pandas
 datasets
+fsspec
+huggingface_hub
 transformers
+sentencepiece
 torch
 scikit-learn
 numpy
 tqdm
-

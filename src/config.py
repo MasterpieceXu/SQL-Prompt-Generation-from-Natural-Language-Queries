@@ -2,9 +2,10 @@
 
 
 RANDOM_SEED = 42
-
+MAX_INPUT_LENGTH = 512
+MAX_TARGET_LENGTH = 256
 DATASET_NAME = "AI4DS/sql_generator_no_cot"
-
+DATASET_PATH = "hf://datasets/AI4DS/sql_generator_no_cot/training_no_cot_dataset.csv"
 CHECKPOINT_DIR = "checkpoints"
 RESULTS_DIR = "results"
 

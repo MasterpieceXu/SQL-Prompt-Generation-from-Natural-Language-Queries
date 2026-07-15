@@ -33,7 +33,83 @@ SQL-Generator/
 
 正在编辑中的探索 notebook 可以暂时留在根目录。准备共享或提交时，建议移动到 `notebooks/`。
 
-`src/` 里的 `.py` 文件目前是 starter template：里面只有每个成员负责的函数入口和 TODO，不是最终实现。大家可以在对应文件里继续补代码，也可以根据实际实验需要调整函数名称和结构。
+`src/` 里的部分 `.py` 文件仍然是 starter template。`src/data_prepare.py` 已经完成数据读取、清洗、划分、tokenization 和 DataLoader，可以直接供后续 baseline、training 和 evaluation 代码调用。
+
+## 数据预处理使用说明
+
+### 当前配置参数
+
+共享参数统一放在 `src/config.py` 中，当前数据预处理使用以下设置：
+
+| 参数 | 当前值 | 作用 |
+|---|---:|---|
+| `RANDOM_SEED` | `42` | 控制 train / validation / test 的可复现划分 |
+| `MAX_INPUT_LENGTH` | `1024` | prompt 的最大 token 长度，过长部分会被截断 |
+| `MAX_TARGET_LENGTH` | `256` | SQL target 的最大 token 长度，过长部分会被截断 |
+| `DATASET_PATH` | `hf://datasets/AI4DS/sql_generator_no_cot/training_no_cot_dataset.csv` | Hugging Face 数据集路径 |
+| `BASELINE_MODEL_NAME` | `t5-small` | 用于加载 tokenizer 的 baseline 模型 |
+
+这些参数集中在 `config.py`，后续成员调整模型、输入长度或输出长度时，不需要直接修改 `data_prepare.py`。
+
+### 预处理流程
+
+`src/data_prepare.py` 的处理流程如下：
+
+1. `load_raw_dataset()` 从 `DATASET_PATH` 读取原始 CSV。
+2. `inspect_dataset(df)` 检查数据规模、列名、缺失值、空字符串和重复行。
+3. `clean_dataset(df)` 删除重复行，去除 prompt 两端空格，并从 Markdown SQL code block 中提取纯 SQL，输出 `prompt` 和 `sql` 两列。
+4. `split_dataset(df)` 按照 80% / 10% / 10% 划分 train、validation 和 test，并使用 `RANDOM_SEED` 保证划分可复现。
+5. `tokenize_dataset(...)` 使用 `t5-small` tokenizer 处理 prompt 和 SQL，生成 `input_ids`、`attention_mask` 和 `labels`。
+6. `build_dataloaders(...)` 使用 `DataCollatorForSeq2Seq` 动态 padding，并返回 train、validation、test 三个 PyTorch DataLoader。
+
+当前数据集经过清洗后有 9397 条样本，默认划分结果约为：train 7517 条、validation 940 条、test 940 条。
+
+### 直接运行完整预处理检查
+
+请在项目根目录运行，并使用一个已经安装项目依赖的 conda 环境。环境名称由每个人自行决定，下面的 `your_env_name` 需要替换成自己的环境名：
+
+```bash
+conda activate your_env_name
+python -m src.data_prepare
+```
+
+该命令会读取数据集、加载 tokenizer、完成 tokenization，并打印 batch shape、tokenized dataset 和三个 DataLoader 的大小。数据和 tokenized dataset 当前不会自动保存到仓库；训练代码应在运行时调用这些函数。
+
+### 在训练代码中调用
+
+其他成员可以按下面的方式获取 DataLoader：
+
+```python
+from transformers import AutoTokenizer
+
+from src.config import BASELINE_MODEL_NAME
+from src.data_prepare import (
+    build_dataloaders,
+    clean_dataset,
+    load_raw_dataset,
+    split_dataset,
+    tokenize_dataset,
+)
+
+df = clean_dataset(load_raw_dataset())
+train_df, val_df, test_df = split_dataset(df)
+
+tokenizer = AutoTokenizer.from_pretrained(BASELINE_MODEL_NAME)
+tokenized_dataset = tokenize_dataset(
+    train_df,
+    val_df,
+    test_df,
+    tokenizer,
+)
+
+train_loader, val_loader, test_loader = build_dataloaders(
+    tokenized_dataset,
+    tokenizer,
+    batch_size=8,
+)
+```
+
+训练时使用 `train_loader`，验证时使用 `val_loader`，最终测试和 error analysis 使用 `test_loader`。DataLoader 返回的 batch 包含 `input_ids`、`attention_mask` 和 `labels`，可以直接传给后续的 T5 training loop。
 
 ## 小组分工
 
@@ -155,7 +231,8 @@ cd SQL-Prompt-Generation-from-Natural-Language-Queries
 安装依赖：
 
 ```bash
-pip install -r requirements.txt
+conda activate your_env_name
+python -m pip install -r requirements.txt
 ```
 
 每次开始写代码前，先拉取最新版本，避免和别人代码冲突：
@@ -230,7 +307,8 @@ git push
 安装依赖：
 
 ```bash
-pip install -r requirements.txt
+conda activate your_env_name
+python -m pip install -r requirements.txt
 ```
 
 如果运行时报缺少某个 package，请把它添加到 `requirements.txt`，并一起提交。
