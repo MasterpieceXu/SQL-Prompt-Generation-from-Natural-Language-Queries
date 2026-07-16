@@ -44,6 +44,9 @@ These observations motivate the schema-aware and decoding improvements evaluated
 in the project. Final task-level exact-match and execution metrics should be reported by
 the shared evaluation pipeline rather than inferred from validation loss alone.
 
+The corresponding training and validation loss curve is available at
+`docs/experiments/figures/member2_baseline_loss.png`.
+
 ## References for the Group Bibliography
 
 [1] C. Raffel et al., "Exploring the Limits of Transfer Learning with a Unified

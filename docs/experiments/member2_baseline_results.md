@@ -42,6 +42,13 @@ Both losses decreased across all three epochs. Epoch 3 produced the lowest valid
 loss and was therefore saved as the best checkpoint. These losses are training
 diagnostics, not Text-to-SQL task accuracy.
 
+![T5-small baseline training and validation loss](figures/member2_baseline_loss.png)
+
+**Figure 1.** Training and validation token-level cross-entropy loss across the three
+baseline epochs. Both series decreased, with no loss-curve evidence of instability or
+overfitting during this short run. Validation loss being lower than training loss is
+plausible because dropout is active during training and disabled during evaluation.
+
 ## Prediction Sanity Check
 
 The script generated 40 predictions from the first 10 test batches. All 40 outputs began
@@ -90,3 +97,9 @@ OneDrive, Google Drive, or another large-file channel.
 
 Do not present the 40-row diagnostic literal-match count as the project's final test
 accuracy.
+
+Regenerate Figure 1 from the recorded values with:
+
+```bash
+python docs/experiments/plot_member2_loss.py
+```
