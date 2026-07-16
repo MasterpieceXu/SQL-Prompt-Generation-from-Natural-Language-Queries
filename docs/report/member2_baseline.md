@@ -20,6 +20,12 @@ motivated by earlier Text-to-SQL research: SQLNet shows that plain sequence gene
 can be sensitive to equivalent condition orderings [2], while RAT-SQL demonstrates the
 importance of explicit schema linking and relation modelling [3].
 
+The baseline assumes that each prompt contains enough schema information to answer the
+question and that truncation to 512 input tokens and 256 target tokens preserves the
+required content. It also treats SQL as an ordered token sequence, even though some SQL
+clauses can have multiple semantically equivalent orderings. These assumptions keep the
+baseline simple but limit schema reasoning and semantic equivalence handling.
+
 ## Model Architecture
 
 `t5-small` is an encoder-decoder Transformer. The encoder reads up to 512 input tokens
@@ -46,6 +52,12 @@ the shared evaluation pipeline rather than inferred from validation loss alone.
 
 The corresponding training and validation loss curve is available at
 `docs/experiments/figures/member2_baseline_loss.png`.
+
+The implementation was verified incrementally before the full run. A smoke test checked
+data loading, tokenisation, forward and backward passes, validation, checkpoint saving,
+and prediction generation. The complete run then used disjoint train, validation, and
+test splits; produced decreasing train and validation loss; saved a complete T5
+checkpoint archive; and generated held-out test predictions for qualitative inspection.
 
 ## References for the Group Bibliography
 

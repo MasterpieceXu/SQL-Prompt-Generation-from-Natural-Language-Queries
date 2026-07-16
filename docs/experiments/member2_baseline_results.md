@@ -10,6 +10,32 @@
 - Best checkpoint criterion: lowest validation loss
 - Downloaded archive: `member2_baseline_output.zip`
 
+## Baseline Assumptions
+
+1. The prompt contains sufficient schema and question information for SQL generation.
+2. Truncating inputs to 512 tokens and targets to 256 tokens does not remove essential
+   content for most examples.
+3. Treating SQL as a left-to-right sequence is an acceptable simple baseline, even
+   though semantically equivalent SQL can use different clause or condition orderings.
+4. Greedy decoding is used to keep the baseline deterministic and to leave beam search
+   as a separately measurable improvement.
+5. Validation loss is used for checkpoint selection, but it is not treated as SQL task
+   accuracy.
+
+## Incremental Verification
+
+The pipeline was tested before the full experiment rather than only at the end:
+
+1. A local one-batch test verified dataset loading, tokenisation, forward propagation,
+   backpropagation, validation, checkpoint writing, and prediction CSV generation.
+2. A Kaggle smoke test used 5 training batches, 2 validation batches, and 1 prediction
+   batch on a Tesla T4. It completed without CUDA, data, or checkpoint errors.
+3. The full run completed all 3 epochs and all 235 validation batches per epoch.
+4. The downloaded result ZIP passed an integrity check and contained the model weights,
+   tokenizer, model configuration, run configuration, loss log, and predictions.
+5. Held-out predictions were inspected to confirm that the model learned SQL structure
+   and to identify schema-linking and semantic failure cases.
+
 ## Reproducible Configuration
 
 | Parameter | Value |
@@ -49,6 +75,11 @@ baseline epochs. Both series decreased, with no loss-curve evidence of instabili
 overfitting during this short run. Validation loss being lower than training loss is
 plausible because dropout is active during training and disabled during evaluation.
 
+No exploding loss, NaN loss, CUDA out-of-memory error, or increasing validation-loss
+trend was observed. The three-epoch curve therefore provides no evidence of unstable
+training or overfitting. However, semantic SQL errors in the diagnostic predictions
+show that low token loss does not rule out task-level underperformance.
+
 ## Prediction Sanity Check
 
 The script generated 40 predictions from the first 10 test batches. All 40 outputs began
@@ -83,6 +114,23 @@ SQL is not sufficient for semantic correctness.
 
 The model weights should not be committed to GitHub. Share the archive through Kaggle,
 OneDrive, Google Drive, or another large-file channel.
+
+## Fair Comparison Protocol
+
+Future models should be compared with this baseline using:
+
+- the same cleaned 7,517 / 940 / 940 data split and random seed 42;
+- the same preprocessing, tokenizer family, and maximum input/target lengths unless the
+  changed input representation is the explicitly tested improvement;
+- the same complete test set and the same normalisation and execution rules;
+- the same task metrics, including normalised exact match, SQL validity, and execution
+  accuracy when databases are available;
+- a clearly documented single incremental change where possible, such as schema-aware
+  formatting or beam search, so the cause of any improvement is interpretable.
+
+The test set must not be used for hyperparameter selection. Validation loss or validation
+task metrics should select settings and checkpoints; the test set should be used only for
+the final baseline-versus-improved comparison.
 
 ## Evaluation Tasks for Member 4
 
