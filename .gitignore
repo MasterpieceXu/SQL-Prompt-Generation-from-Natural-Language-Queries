@@ -13,6 +13,8 @@ env/
 data/
 *.csv
 *.parquet
+!results/baseline_training_log.csv
+!results/baseline_predictions.csv
 
 checkpoints/*
 !checkpoints/.gitkeep
