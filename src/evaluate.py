@@ -1,25 +1,803 @@
 """Member 4: evaluation and error analysis."""
 
+from __future__ import annotations
+
+import json
+import os
+import re
+import sqlite3
+import tempfile
+import time
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Mapping
+
+import torch
+
+
+def normalize_sql(sql: str | None) -> str:
+    """Normalize SQL conservatively for exact string comparison."""
+    if sql is None:
+        return ""
+
+    normalized = re.sub(r"\s+", " ", str(sql).strip().lower())
+    if normalized.endswith(";"):
+        normalized = normalized[:-1].rstrip()
+    return normalized
+
+
+def normalized_exact_match(target_sql: str | None, predicted_sql: str | None) -> bool:
+    """Return whether one prediction exactly matches its target after normalization."""
+    return normalize_sql(target_sql) == normalize_sql(predicted_sql)
+
+
+def evaluate_normalized_exact_match(
+    targets: Sequence[str | None],
+    predictions: Sequence[str | None],
+) -> dict[str, int | float]:
+    """Evaluate normalized exact match over two aligned SQL sequences."""
+    if len(targets) != len(predictions):
+        raise ValueError("targets and predictions must have the same length")
+
+    correct = sum(
+        normalized_exact_match(target, prediction)
+        for target, prediction in zip(targets, predictions)
+    )
+    total = len(targets)
+    return {
+        "correct": correct,
+        "total": total,
+        "accuracy": correct / total if total else 0.0,
+    }
+
 
 def exact_match_score(predictions, references):
-    """Calculate exact match between generated SQL and reference SQL."""
-    # TODO(Member 4): normalize SQL strings and compute exact match.
-    pass
+    """Calculate normalized exact match for aligned predictions and references."""
+    return evaluate_normalized_exact_match(references, predictions)
+
+
+_SQLITE_WRITE_ACTIONS = {
+    sqlite3.SQLITE_ALTER_TABLE,
+    sqlite3.SQLITE_ANALYZE,
+    sqlite3.SQLITE_ATTACH,
+    sqlite3.SQLITE_CREATE_INDEX,
+    sqlite3.SQLITE_CREATE_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_INDEX,
+    sqlite3.SQLITE_CREATE_TEMP_TABLE,
+    sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
+    sqlite3.SQLITE_CREATE_TEMP_VIEW,
+    sqlite3.SQLITE_CREATE_TRIGGER,
+    sqlite3.SQLITE_CREATE_VIEW,
+    sqlite3.SQLITE_CREATE_VTABLE,
+    sqlite3.SQLITE_DELETE,
+    sqlite3.SQLITE_DETACH,
+    sqlite3.SQLITE_DROP_INDEX,
+    sqlite3.SQLITE_DROP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_INDEX,
+    sqlite3.SQLITE_DROP_TEMP_TABLE,
+    sqlite3.SQLITE_DROP_TEMP_TRIGGER,
+    sqlite3.SQLITE_DROP_TEMP_VIEW,
+    sqlite3.SQLITE_DROP_TRIGGER,
+    sqlite3.SQLITE_DROP_VIEW,
+    sqlite3.SQLITE_DROP_VTABLE,
+    sqlite3.SQLITE_INSERT,
+    sqlite3.SQLITE_PRAGMA,
+    sqlite3.SQLITE_REINDEX,
+    sqlite3.SQLITE_TRANSACTION,
+    sqlite3.SQLITE_UPDATE,
+}
+
+
+def _validity_result(
+    valid: bool,
+    category: str,
+    error_message: str | None = None,
+) -> dict[str, bool | str | None]:
+    return {
+        "valid": valid,
+        "category": category,
+        "error_message": error_message,
+    }
+
+
+def _sqlite_error_category(message: str) -> str:
+    lowered = message.lower()
+    if "one statement at a time" in lowered:
+        return "syntax_error"
+    if "no such table" in lowered:
+        return "missing_table"
+    if "no such column" in lowered:
+        return "missing_column"
+    if "syntax error" in lowered or "incomplete input" in lowered:
+        return "syntax_error"
+    return "execution_error"
+
+
+def check_sql_validity(
+    predicted_sql: str | None,
+    schema_sql: str | None = None,
+    *,
+    timeout_seconds: float = 1.0,
+    max_sql_length: int = 1_000_000,
+) -> dict[str, bool | str | None]:
+    """Conservatively check whether SQLite can parse and plan one read query.
+
+    This checks SQL validity only. It does not execute the predicted query and
+    does not measure whether the query has the intended semantics.
+    """
+    if predicted_sql is None or not str(predicted_sql).strip():
+        return _validity_result(False, "empty_sql", "SQL is empty")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    if max_sql_length < 1:
+        raise ValueError("max_sql_length must be at least 1")
+
+    sql = str(predicted_sql)
+    if len(sql) > max_sql_length:
+        return _validity_result(
+            False,
+            "execution_error",
+            f"SQL exceeds the maximum length of {max_sql_length} characters",
+        )
+
+    connection = sqlite3.connect(":memory:")
+    deadline = time.monotonic() + timeout_seconds
+
+    def stop_after_deadline() -> int:
+        return int(time.monotonic() >= deadline)
+
+    try:
+        connection.set_progress_handler(stop_after_deadline, 1000)
+
+        if schema_sql is not None:
+            try:
+                # Schema setup happens only in the isolated in-memory database.
+                # ATTACH/DETACH are denied to prevent access to external files.
+                connection.set_authorizer(
+                    lambda action, _arg1, _arg2, _db, _source: (
+                        sqlite3.SQLITE_DENY
+                        if action in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH}
+                        else sqlite3.SQLITE_OK
+                    )
+                )
+                connection.executescript(str(schema_sql))
+            except sqlite3.Error as error:
+                return _validity_result(False, "schema_error", str(error))
+
+        def read_only_authorizer(
+            action: int,
+            _arg1: str | None,
+            _arg2: str | None,
+            _database: str | None,
+            _source: str | None,
+        ) -> int:
+            if action in _SQLITE_WRITE_ACTIONS:
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        connection.set_authorizer(read_only_authorizer)
+        try:
+            # EXPLAIN makes SQLite parse, resolve names, and build a plan
+            # without running the predicted statement.
+            connection.execute(f"EXPLAIN {sql}").fetchall()
+        except (sqlite3.Error, sqlite3.Warning) as error:
+            message = str(error)
+            return _validity_result(
+                False,
+                _sqlite_error_category(message),
+                message,
+            )
+        return _validity_result(True, "valid")
+    finally:
+        connection.close()
 
 
 def sql_validity_check(predictions):
-    """Check whether generated SQL strings are syntactically valid."""
-    # TODO(Member 4): use sqlparse or SQLite-based checks if appropriate.
-    pass
+    """Compatibility wrapper for checking one SQL string or a sequence."""
+    if isinstance(predictions, (str, type(None))):
+        return check_sql_validity(predictions)
+    return [check_sql_validity(prediction) for prediction in predictions]
 
 
-def evaluate_model(model, test_loader):
-    """Evaluate a trained model on the test set."""
-    # TODO(Member 4): generate SQL predictions and compute metrics.
-    pass
+_ERROR_CATEGORY_ORDER = (
+    "exact_match",
+    "empty_output",
+    "syntax_error",
+    "missing_table",
+    "missing_column",
+    "wrong_table",
+    "wrong_column",
+    "join_error",
+    "aggregation_error",
+    "filter_error",
+    "grouping_error",
+    "ordering_limit_error",
+    "nested_query_error",
+    "alias_error",
+    "structurally_different",
+    "unclassified",
+)
+_SQL_KEYWORDS = {
+    "all", "and", "as", "asc", "between", "by", "case", "desc", "distinct",
+    "else", "end", "exists", "from", "full", "group", "having", "in", "inner",
+    "is", "join", "left", "like", "limit", "not", "null", "offset", "on", "or",
+    "order", "outer", "right", "select", "then", "union", "when", "where", "with",
+}
+_AGGREGATE_FUNCTIONS = {"avg", "count", "group_concat", "max", "min", "sum", "total"}
+_CLAUSE_BOUNDARIES = {
+    "where", "group", "having", "order", "limit", "offset", "union",
+}
+
+
+def _sql_tokens(sql: str | None) -> list[str]:
+    """Tokenize enough SQL structure for conservative deterministic comparison."""
+    text = "" if sql is None else str(sql)
+    # String literals are values rather than SQL structure. Mask their contents,
+    # including doubled SQL quote escapes, before token inspection.
+    text = re.sub(r"'(?:''|[^'])*'", " ? ", text)
+    return re.findall(
+        r'"(?:""|[^"])*"|`[^`]*`|\[[^\]]*\]|'
+        r'[a-zA-Z_][a-zA-Z0-9_$]*|\d+(?:\.\d+)?|'
+        r'<>|!=|<=|>=|[(),.*=<>+\-/]',
+        text.lower(),
+    )
+
+
+def _identifier(token: str) -> str:
+    if token[:1] == token[-1:] and token[:1] in {'"', "`"}:
+        return token[1:-1].replace(token[:1] * 2, token[:1])
+    if token.startswith("[") and token.endswith("]"):
+        return token[1:-1]
+    return token
+
+
+def _table_names(tokens: Sequence[str]) -> list[str]:
+    tables: list[str] = []
+    for index, token in enumerate(tokens[:-1]):
+        if token not in {"from", "join"}:
+            continue
+        candidate = tokens[index + 1]
+        if candidate != "(" and candidate not in _SQL_KEYWORDS:
+            tables.append(_identifier(candidate))
+    return tables
+
+
+def _select_columns(tokens: Sequence[str]) -> set[str] | None:
+    """Return simple projected identifiers, or None for a complex projection."""
+    try:
+        start = tokens.index("select") + 1
+        end = tokens.index("from", start)
+    except ValueError:
+        return None
+    projection = tokens[start:end]
+    if any(token in {"(", ")", "*"} for token in projection):
+        return None
+    columns = {
+        _identifier(token)
+        for token in projection
+        if (
+            re.fullmatch(r'[a-zA-Z_][a-zA-Z0-9_$]*|".*"|`.*`|\[.*\]', token)
+            and token not in _SQL_KEYWORDS
+        )
+    }
+    # Dotted qualifiers and explicit aliases make attribution ambiguous.
+    if "." in projection or "as" in projection:
+        return None
+    return columns
+
+
+def _clause(tokens: Sequence[str], start_words: tuple[str, ...]) -> tuple[str, ...] | None:
+    width = len(start_words)
+    start = next(
+        (
+            index + width
+            for index in range(len(tokens) - width + 1)
+            if tuple(tokens[index:index + width]) == start_words
+        ),
+        None,
+    )
+    if start is None:
+        return None
+    end = len(tokens)
+    for index in range(start, len(tokens)):
+        if tokens[index] in _CLAUSE_BOUNDARIES:
+            if index == start and tokens[index] == start_words[-1]:
+                continue
+            end = index
+            break
+    return tuple(tokens[start:end])
+
+
+def _aliases(tokens: Sequence[str]) -> set[tuple[str, str]]:
+    aliases: set[tuple[str, str]] = set()
+    for index, token in enumerate(tokens[:-1]):
+        if token == "as" and index > 0:
+            alias = tokens[index + 1]
+            if alias not in _SQL_KEYWORDS:
+                aliases.add((_identifier(tokens[index - 1]), _identifier(alias)))
+        elif token in {"from", "join"} and index + 2 < len(tokens):
+            source, alias = tokens[index + 1:index + 3]
+            if (
+                source != "("
+                and alias not in _SQL_KEYWORDS
+                and alias not in {",", ")", "(", "."}
+            ):
+                aliases.add((_identifier(source), _identifier(alias)))
+    return aliases
+
+
+def analyze_prediction_error(
+    target_sql: str | None,
+    predicted_sql: str | None,
+    validity_result: Mapping[str, Any] | None = None,
+    prompt: str | None = None,
+    sample_id: Any = None,
+) -> dict[str, Any]:
+    """Classify one SQL prediction using deterministic structural evidence.
+
+    The result describes textual/structural differences only; it does not claim
+    that two differently written queries are or are not semantically equivalent.
+    """
+    del prompt  # Accepted for record-oriented callers; deliberately not interpreted.
+    if validity_result is not None and not isinstance(validity_result, Mapping):
+        raise ValueError("validity_result must be a mapping or None")
+
+    validity = dict(validity_result) if validity_result is not None else None
+    validity_category = validity.get("category") if validity is not None else None
+    error_message = validity.get("error_message") if validity is not None else None
+    exact_match = normalized_exact_match(target_sql, predicted_sql)
+    categories: set[str] = set()
+
+    if exact_match:
+        categories.add("exact_match")
+    elif not normalize_sql(predicted_sql):
+        categories.add("empty_output")
+    elif validity_category in {
+        "empty_sql", "syntax_error", "missing_table", "missing_column",
+    }:
+        categories.add(
+            {
+                "empty_sql": "empty_output",
+                "syntax_error": "syntax_error",
+                "missing_table": "missing_table",
+                "missing_column": "missing_column",
+            }[validity_category]
+        )
+    else:
+        target_tokens = _sql_tokens(target_sql)
+        predicted_tokens = _sql_tokens(predicted_sql)
+        target_tables = _table_names(target_tokens)
+        predicted_tables = _table_names(predicted_tokens)
+
+        if (
+            target_tables
+            and predicted_tables
+            and set(target_tables) != set(predicted_tables)
+        ):
+            categories.add("wrong_table")
+
+        target_columns = _select_columns(target_tokens)
+        predicted_columns = _select_columns(predicted_tokens)
+        if (
+            set(target_tables) == set(predicted_tables)
+            and target_columns is not None
+            and predicted_columns is not None
+            and target_columns != predicted_columns
+        ):
+            categories.add("wrong_column")
+
+        if (
+            target_tokens.count("join") != predicted_tokens.count("join")
+            or (
+                "join" in target_tokens
+                and "join" in predicted_tokens
+                and _clause(target_tokens, ("on",))
+                != _clause(predicted_tokens, ("on",))
+            )
+        ):
+            categories.add("join_error")
+
+        target_aggregates = [
+            token for index, token in enumerate(target_tokens[:-1])
+            if token in _AGGREGATE_FUNCTIONS and target_tokens[index + 1] == "("
+        ]
+        predicted_aggregates = [
+            token for index, token in enumerate(predicted_tokens[:-1])
+            if token in _AGGREGATE_FUNCTIONS and predicted_tokens[index + 1] == "("
+        ]
+        if (
+            target_aggregates != predicted_aggregates
+            or target_tokens.count("distinct") != predicted_tokens.count("distinct")
+        ):
+            categories.add("aggregation_error")
+
+        if _clause(target_tokens, ("where",)) != _clause(
+            predicted_tokens, ("where",)
+        ):
+            categories.add("filter_error")
+        if (
+            _clause(target_tokens, ("group", "by"))
+            != _clause(predicted_tokens, ("group", "by"))
+            or _clause(target_tokens, ("having",))
+            != _clause(predicted_tokens, ("having",))
+        ):
+            categories.add("grouping_error")
+        if any(
+            _clause(target_tokens, words) != _clause(predicted_tokens, words)
+            for words in (("order", "by"), ("limit",), ("offset",))
+        ):
+            categories.add("ordering_limit_error")
+        if target_tokens.count("select") != predicted_tokens.count("select"):
+            categories.add("nested_query_error")
+        if _aliases(target_tokens) != _aliases(predicted_tokens):
+            categories.add("alias_error")
+
+        if not categories:
+            categories.add(
+                "structurally_different"
+                if target_tokens != predicted_tokens
+                else "unclassified"
+            )
+
+    ordered_categories = [
+        category for category in _ERROR_CATEGORY_ORDER if category in categories
+    ]
+    return {
+        "sample_id": sample_id,
+        "exact_match": exact_match,
+        "categories": ordered_categories,
+        "primary_category": ordered_categories[0],
+        "target_sql": target_sql,
+        "predicted_sql": predicted_sql,
+        "validity": validity,
+        "error_message": error_message,
+    }
+
+
+def summarize_error_analysis(
+    records: Sequence[Mapping[str, Any]],
+    max_examples_per_category: int = 3,
+) -> dict[str, Any]:
+    """Aggregate prediction or analysis records into a deterministic summary."""
+    if isinstance(records, (str, bytes)) or not isinstance(records, Sequence):
+        raise ValueError("records must be a sequence of mappings")
+    if not isinstance(max_examples_per_category, int) or max_examples_per_category < 0:
+        raise ValueError("max_examples_per_category must be a non-negative integer")
+
+    analyses: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, Mapping):
+            raise ValueError(f"record at index {index} must be a mapping")
+        if "error_analysis" in record:
+            record = record["error_analysis"]
+            if not isinstance(record, Mapping):
+                raise ValueError(
+                    f"error_analysis at record index {index} must be a mapping"
+                )
+        if "categories" in record:
+            required = {
+                "sample_id", "exact_match", "categories", "primary_category",
+                "target_sql", "predicted_sql", "validity", "error_message",
+            }
+            missing = sorted(required.difference(record))
+            if missing:
+                raise ValueError(
+                    f"analysis record at index {index} is missing: {', '.join(missing)}"
+                )
+            categories = record["categories"]
+            if (
+                isinstance(categories, (str, bytes))
+                or not isinstance(categories, Sequence)
+                or not categories
+                or any(category not in _ERROR_CATEGORY_ORDER for category in categories)
+            ):
+                raise ValueError(f"analysis record at index {index} has invalid categories")
+            if record["primary_category"] not in categories:
+                raise ValueError(
+                    f"analysis record at index {index} has invalid primary_category"
+                )
+            analyses.append(dict(record))
+        else:
+            missing = [
+                field for field in ("target_sql", "predicted_sql")
+                if field not in record
+            ]
+            if missing:
+                raise ValueError(
+                    f"prediction record at index {index} is missing: {', '.join(missing)}"
+                )
+            validity_result = record.get("validity_result", record.get("validity"))
+            analyses.append(
+                analyze_prediction_error(
+                    record["target_sql"],
+                    record["predicted_sql"],
+                    validity_result=validity_result,
+                    prompt=record.get("prompt"),
+                    sample_id=record.get("sample_id", record.get("index")),
+                )
+            )
+
+    total = len(analyses)
+    category_counts = {category: 0 for category in _ERROR_CATEGORY_ORDER}
+    primary_counts = {category: 0 for category in _ERROR_CATEGORY_ORDER}
+    examples = {category: [] for category in _ERROR_CATEGORY_ORDER}
+    for analysis in analyses:
+        primary_counts[analysis["primary_category"]] += 1
+        for category in analysis["categories"]:
+            category_counts[category] += 1
+            if len(examples[category]) < max_examples_per_category:
+                examples[category].append(
+                    {
+                        "sample_id": analysis["sample_id"],
+                        "target_sql": analysis["target_sql"],
+                        "predicted_sql": analysis["predicted_sql"],
+                        "error_message": analysis["error_message"],
+                    }
+                )
+
+    exact_matches = sum(bool(analysis["exact_match"]) for analysis in analyses)
+    return {
+        "total": total,
+        "exact_matches": exact_matches,
+        "errors": total - exact_matches,
+        "category_counts": category_counts,
+        "category_rates": {
+            category: count / total if total else 0.0
+            for category, count in category_counts.items()
+        },
+        "primary_category_counts": primary_counts,
+        "representative_examples": examples,
+    }
+
+
+def _batch_values(value: Any, count: int, field_name: str) -> list[Any]:
+    """Return a batch metadata value as a list aligned to generated examples."""
+    if isinstance(value, torch.Tensor):
+        values = value.detach().cpu().tolist()
+        if value.ndim == 0:
+            values = [values]
+    elif isinstance(value, (str, bytes)) or value is None:
+        values = [value]
+    else:
+        try:
+            values = list(value)
+        except TypeError:
+            values = [value]
+
+    if len(values) != count:
+        raise ValueError(
+            f"{field_name} count ({len(values)}) does not match "
+            f"prediction count ({count})"
+        )
+    return values
+
+
+def _schema_values(batch: Mapping[str, Any], count: int) -> list[str | None]:
+    """Return shared or per-example schema SQL, preferring ``schema_sql``."""
+    values: list[Any] = [None] * count
+    for field_name in ("schema", "schema_sql"):
+        if field_name not in batch:
+            continue
+        value = batch[field_name]
+        if isinstance(value, (str, bytes)) or value is None:
+            field_values = [value] * count
+        else:
+            field_values = _batch_values(value, count, field_name)
+        values = [
+            fallback if preferred is None else preferred
+            for fallback, preferred in zip(values, field_values)
+        ]
+    return [
+        None if value is None else str(value)
+        for value in values
+    ]
+
+
+def _decode_labels(labels: Any, tokenizer) -> list[str]:
+    """Decode labels without changing the tensor held by the input batch."""
+    if not isinstance(labels, torch.Tensor):
+        labels = torch.as_tensor(labels)
+    safe_labels = labels.detach().cpu().clone()
+    safe_labels[safe_labels == -100] = tokenizer.pad_token_id
+    return list(tokenizer.batch_decode(safe_labels, skip_special_tokens=True))
+
+
+def _validate_existing_jsonl(path: Path) -> None:
+    """Refuse to overwrite an existing file that is not valid object JSONL."""
+    if not path.exists():
+        return
+    if not path.is_file():
+        raise ValueError(f"Output path is not a file: {path}")
+
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                if not line.strip():
+                    raise ValueError(f"blank line at line {line_number}")
+                value = json.loads(line)
+                if not isinstance(value, dict):
+                    raise ValueError(f"non-object JSON at line {line_number}")
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        raise ValueError(
+            f"Refusing to overwrite malformed JSONL output: {path}"
+        ) from error
+
+
+def evaluate_model(
+    model,
+    data_loader,
+    tokenizer,
+    device,
+    generation_kwargs: Mapping[str, Any] | None = None,
+    max_batches: int | None = None,
+    output_path: str | Path | None = None,
+    include_validity: bool = False,
+    include_error_analysis: bool = False,
+) -> dict[str, Any]:
+    """Generate SQL and optionally add validity and error-analysis details."""
+    if max_batches is not None and max_batches < 1:
+        raise ValueError("max_batches must be at least 1")
+
+    generation_options = dict(generation_kwargs or {})
+    records: list[dict[str, Any]] = []
+    batch_count = 0
+    example_index = 0
+    metadata_fields = {"labels", "sample_id", "prompt", "target_sql"}
+    if include_validity or include_error_analysis:
+        metadata_fields.update({"schema_sql", "schema"})
+    started_at = time.perf_counter()
+
+    device = torch.device(device)
+    model.to(device)
+    model.eval()
+    with torch.no_grad():
+        for batch_number, batch in enumerate(data_loader):
+            if max_batches is not None and batch_number >= max_batches:
+                break
+            batch_count += 1
+
+            if "labels" not in batch and "target_sql" not in batch:
+                raise ValueError("Each batch must contain labels or target_sql")
+
+            model_inputs = {
+                key: value.to(device)
+                for key, value in batch.items()
+                if isinstance(value, torch.Tensor) and key not in metadata_fields
+            }
+            generated_ids = model.generate(
+                **model_inputs,
+                **generation_options,
+            )
+            predictions = list(
+                tokenizer.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                )
+            )
+
+            if "target_sql" in batch:
+                targets = _batch_values(
+                    batch["target_sql"],
+                    len(predictions),
+                    "target_sql",
+                )
+                targets = ["" if target is None else str(target) for target in targets]
+            else:
+                targets = _decode_labels(batch["labels"], tokenizer)
+                if len(targets) != len(predictions):
+                    raise ValueError(
+                        f"target count ({len(targets)}) does not match "
+                        f"prediction count ({len(predictions)})"
+                    )
+
+            metadata: dict[str, list[Any]] = {}
+            for field_name in ("sample_id", "prompt"):
+                if field_name in batch:
+                    metadata[field_name] = _batch_values(
+                        batch[field_name],
+                        len(predictions),
+                        field_name,
+                    )
+            schemas = (
+                _schema_values(batch, len(predictions))
+                if include_validity or include_error_analysis
+                else [None] * len(predictions)
+            )
+
+            for offset, (target_sql, predicted_sql) in enumerate(
+                zip(targets, predictions)
+            ):
+                normalized_target = normalize_sql(target_sql)
+                normalized_prediction = normalize_sql(predicted_sql)
+                record: dict[str, Any] = {
+                    "index": example_index,
+                    "target_sql": target_sql,
+                    "predicted_sql": predicted_sql,
+                    "normalized_target_sql": normalized_target,
+                    "normalized_predicted_sql": normalized_prediction,
+                    "exact_match": normalized_target == normalized_prediction,
+                }
+                for field_name, values in metadata.items():
+                    record[field_name] = values[offset]
+
+                validity_result = None
+                if include_validity or include_error_analysis:
+                    validity_result = check_sql_validity(
+                        predicted_sql,
+                        schemas[offset],
+                    )
+                if include_validity:
+                    record["validity_result"] = validity_result
+                    record["sql_valid"] = validity_result["valid"]
+                    record["validity_category"] = validity_result["category"]
+                    record["validity_error_message"] = validity_result["error_message"]
+                if include_error_analysis:
+                    analysis = analyze_prediction_error(
+                        target_sql,
+                        predicted_sql,
+                        validity_result=validity_result,
+                        prompt=record.get("prompt"),
+                        sample_id=record.get("sample_id", example_index),
+                    )
+                    record["error_categories"] = analysis["categories"]
+                    record["primary_error_category"] = analysis["primary_category"]
+                    record["error_analysis"] = analysis
+                records.append(record)
+                example_index += 1
+
+    if batch_count == 0:
+        raise ValueError("data_loader produced no batches")
+
+    elapsed_seconds = time.perf_counter() - started_at
+    correct = sum(record["exact_match"] for record in records)
+    total = len(records)
+    result = {
+        "records": records,
+        "correct": correct,
+        "total": total,
+        "accuracy": correct / total if total else 0.0,
+        "elapsed_seconds": elapsed_seconds,
+        "examples_per_second": total / elapsed_seconds if elapsed_seconds else 0.0,
+        "generation_kwargs": generation_options,
+    }
+    if include_error_analysis:
+        result["error_summary"] = summarize_error_analysis(records)
+
+    if output_path is not None:
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _validate_existing_jsonl(path)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as file:
+                temporary_path = Path(file.name)
+                for record in records:
+                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+                file.flush()
+            os.replace(temporary_path, path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    return result
 
 
 def error_analysis(predictions, references):
     """Analyze common generation errors."""
-    # TODO(Member 4): categorize errors for Results and Discussion sections.
-    pass
+    if len(predictions) != len(references):
+        raise ValueError("predictions and references must have the same length")
+    return summarize_error_analysis(
+        [
+            {"target_sql": target, "predicted_sql": prediction}
+            for prediction, target in zip(predictions, references)
+        ]
+    )
