@@ -1,0 +1,13 @@
+{
+  "model": "t5-small baseline",
+  "epochs_run": 5,
+  "selected_epoch": 5,
+  "best_validation_loss": 0.2831777810574846,
+  "metric": "normalized_exact_match",
+  "correct": 71,
+  "total": 940,
+  "accuracy": 0.07553191489361702,
+  "accuracy_percent": 7.553191489361702,
+  "decoding": "greedy (num_beams=1)",
+  "seed": 42
+}

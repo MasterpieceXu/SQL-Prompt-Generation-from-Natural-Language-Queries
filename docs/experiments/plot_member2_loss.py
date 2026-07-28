@@ -17,9 +17,21 @@ import matplotlib.pyplot as plt
 
 
 # Copied from results/baseline_training_log.csv in the verified Kaggle output.
-EPOCHS = [1, 2, 3]
-TRAIN_LOSS = [1.0609924704470532, 0.5774083773902756, 0.4639583017597807]
-VALIDATION_LOSS = [0.5069119820569424, 0.391915359205388, 0.34320044599949046]
+EPOCHS = [1, 2, 3, 4, 5]
+TRAIN_LOSS = [
+    1.0609924704470532,
+    0.5774083773902756,
+    0.4639583017597807,
+    0.40063822138261923,
+    0.35707026592832297,
+]
+VALIDATION_LOSS = [
+    0.5069119820569424,
+    0.391915359205388,
+    0.34320044599949046,
+    0.31008938481198983,
+    0.2831777810574846,
+]
 
 
 def main() -> None:
@@ -99,7 +111,7 @@ def main() -> None:
     axis.set_xlabel("Epoch")
     axis.set_ylabel("Token-level cross-entropy loss")
     axis.set_xticks(EPOCHS)
-    axis.set_xlim(0.8, 3.2)
+    axis.set_xlim(0.8, 5.2)
     axis.set_ylim(0, 1.2)
     axis.grid(axis="y", color="#e5e7eb", linewidth=0.8)
     axis.spines["top"].set_visible(False)
@@ -109,7 +121,7 @@ def main() -> None:
     figure.text(
         0.125,
         0.015,
-        "Source: verified Kaggle baseline_training_log.csv; training completed 16 July 2026.",
+        "Source: verified Kaggle baseline_training_log.csv; training completed 27 July 2026.",
         color="#6b7280",
         fontsize=8,
     )

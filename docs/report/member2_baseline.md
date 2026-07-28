@@ -37,18 +37,19 @@ layers, six decoder layers, eight attention heads, and dropout of 0.1.
 During training, the cleaned SQL query is supplied as the decoder label sequence. T5
 computes token-level cross-entropy loss, while padded label positions are represented by
 `-100` and ignored by the loss. Parameters are updated with AdamW using a learning rate
-of `5e-5`. The experiment uses batch size 4, three epochs, and random seed 42. The model
+of `5e-5`. The experiment uses batch size 4, five epochs, and random seed 42. The model
 with the lowest validation loss is saved as the best checkpoint. For the baseline,
 inference uses greedy decoding (`num_beams=1`) so that beam search remains a separate,
 measurable improvement rather than part of the comparison model.
 
 The baseline validation loss decreased from 0.5069 after epoch 1 to 0.3432 after epoch
-3, showing stable learning. However, a diagnostic sample of 40 generated queries also
-showed the expected limitations of a plain sequence model: outputs were SQL-like, but
-errors remained in table aliases, column selection, joins, filters, and aggregation.
-These observations motivate the schema-aware and decoding improvements evaluated later
-in the project. Final task-level exact-match and execution metrics should be reported by
-the shared evaluation pipeline rather than inferred from validation loss alone.
+3 and 0.2832 after epoch 5, showing stable learning without a validation-loss increase.
+The complete 940-example test split produced 71 normalized exact matches (7.5532%).
+Normalization lowercases SQL, trims it, collapses whitespace, and removes one trailing
+semicolon. This strict string metric does not identify semantically equivalent SQL.
+Generated outputs were generally SQL-like, but errors remained in table aliases, column
+selection, joins, filters, and aggregation. These observations motivate the schema-aware
+and decoding improvements evaluated later in the project.
 
 The corresponding training and validation loss curve is available at
 `docs/experiments/figures/member2_baseline_loss.png`.
@@ -57,7 +58,7 @@ The implementation was verified incrementally before the full run. A smoke test 
 data loading, tokenisation, forward and backward passes, validation, checkpoint saving,
 and prediction generation. The complete run then used disjoint train, validation, and
 test splits; produced decreasing train and validation loss; saved a complete T5
-checkpoint archive; and generated held-out test predictions for qualitative inspection.
+checkpoint archive; and generated predictions for all 940 held-out test examples.
 
 ## References for the Group Bibliography
 
@@ -76,7 +77,8 @@ Text-to-SQL Parsers," in *Proceedings of ACL*, 2020.
 My contribution was the T5-small baseline. I formulated Text-to-SQL as a text-to-text
 task: the encoder reads the schema and natural-language question, and the decoder
 generates SQL token by token. I implemented model loading, AdamW optimisation,
-cross-entropy training, checkpoint selection, and prediction generation. Across three
-epochs, validation loss decreased from 0.5069 to 0.3432. The model learned to produce
-SQL-shaped queries, but schema-linking and alias errors remained, which provides a clear
-motivation for the group's improved method.
+cross-entropy training, checkpoint selection, and prediction generation. Across five
+epochs, validation loss decreased from 0.5069 to 0.2832. On all 940 held-out examples,
+the model achieved 71 normalized exact matches, or 7.5532%. The model learned to produce
+SQL-shaped queries, but schema-linking and alias errors remained, which motivates the
+group's improved method.
