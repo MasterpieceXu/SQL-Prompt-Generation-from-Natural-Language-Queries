@@ -274,6 +274,16 @@ def train_baseline(args: argparse.Namespace) -> None:
             save_baseline_model(model, tokenizer, run_dir / "best")
 
     write_training_log(history, results_dir / "baseline_training_log.csv")
+
+    # Evaluate the checkpoint selected by validation loss, not merely the final epoch.
+    best_checkpoint = run_dir / "best"
+    del optimizer
+    del model
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    tokenizer, model = load_baseline_model(str(best_checkpoint))
+    model.to(device)
+
     write_baseline_predictions(
         model,
         tokenizer,

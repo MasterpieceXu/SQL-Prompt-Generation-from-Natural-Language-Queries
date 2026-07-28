@@ -30,9 +30,9 @@ The pipeline was tested before the full experiment rather than only at the end:
    backpropagation, validation, checkpoint writing, and prediction CSV generation.
 2. A Kaggle smoke test used 5 training batches, 2 validation batches, and 1 prediction
    batch on a Tesla T4. It completed without CUDA, data, or checkpoint errors.
-3. The full run completed all 5 epochs and all 235 validation batches per epoch.
+3. The full run completed all 10 epochs and all 235 validation batches per epoch.
 4. The downloaded result ZIP passed an integrity check and contained the model weights,
-   tokenizer, model configuration, run configuration, five-epoch loss log, 940
+   tokenizer, model configuration, run configuration, ten-epoch loss log, 940
    predictions, and the complete-test metric summary.
 5. Held-out predictions were inspected to confirm that the model learned SQL structure
    and to identify schema-linking and semantic failure cases.
@@ -45,7 +45,7 @@ The pipeline was tested before the full experiment rather than only at the end:
 | Optimizer | AdamW |
 | Learning rate | `5e-5` |
 | Batch size | `4` |
-| Epochs | `5` |
+| Epochs | `10` |
 | Random seed | `42` |
 | Maximum input length | `512` |
 | Maximum target length | `256` |
@@ -54,7 +54,7 @@ The pipeline was tested before the full experiment rather than only at the end:
 Equivalent command:
 
 ```bash
-python -m src.baseline --epochs 5 --batch_size 4 --learning_rate 5e-5 --max_prediction_batches 235
+python -m src.baseline --epochs 10 --batch_size 4 --learning_rate 5e-5 --max_prediction_batches 235
 ```
 
 ## Loss History
@@ -66,35 +66,41 @@ python -m src.baseline --epochs 5 --batch_size 4 --learning_rate 5e-5 --max_pred
 | 3 | 0.4640 | 0.3432 |
 | 4 | 0.4006 | 0.3101 |
 | 5 | 0.3571 | 0.2832 |
+| 6 | 0.3254 | 0.2685 |
+| 7 | 0.2992 | 0.2575 |
+| 8 | 0.2794 | 0.2454 |
+| 9 | 0.2626 | 0.2357 |
+| 10 | 0.2487 | 0.2306 |
 
-Both losses decreased across all five epochs. Epoch 5 produced the lowest validation
+Both losses decreased across all ten epochs. Epoch 10 produced the lowest validation
 loss and was therefore saved as the best checkpoint. The validation curve had not fully
-plateaued, but it showed no loss-curve evidence of overfitting. These losses are training
-diagnostics, not Text-to-SQL task accuracy.
+plateaued, but the improvement per epoch was becoming smaller and there was no
+loss-curve evidence of overfitting. These losses are training diagnostics, not
+Text-to-SQL task accuracy.
 
 ![T5-small baseline training and validation loss](figures/member2_baseline_loss.png)
 
-**Figure 1.** Training and validation token-level cross-entropy loss across the five
+**Figure 1.** Training and validation token-level cross-entropy loss across the ten
 baseline epochs. Both series decreased, with no loss-curve evidence of instability or
 overfitting during this short run. Validation loss being lower than training loss is
 plausible because dropout is active during training and disabled during evaluation.
 
 No exploding loss, NaN loss, CUDA out-of-memory error, or increasing validation-loss
-trend was observed. The five-epoch curve therefore provides no evidence of unstable
+trend was observed. The ten-epoch curve therefore provides no evidence of unstable
 training or overfitting. However, semantic SQL errors in the diagnostic predictions
 show that low token loss does not rule out task-level underperformance.
 
 ## Complete Test Evaluation
 
-The selected epoch-5 checkpoint generated predictions for all 940 examples in the
-held-out test split. Using the shared conservative normalization, 71 predictions exactly
-matched their targets:
+The selected epoch-10 checkpoint generated predictions for all 940 examples in the
+held-out test split. Using the shared conservative normalization, 103 predictions
+exactly matched their targets:
 
 | Metric | Result |
 |---|---:|
-| Correct normalized exact matches | 71 |
+| Correct normalized exact matches | 103 |
 | Test examples | 940 |
-| Normalized exact-match accuracy | 7.5532% |
+| Normalized exact-match accuracy | 10.9574% |
 
 The normalization lowercases SQL, trims leading and trailing whitespace, collapses
 internal whitespace, and removes one trailing semicolon. It remains a strict string
