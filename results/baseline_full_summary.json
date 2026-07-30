@@ -1,0 +1,14 @@
+{
+  "model": "t5-small baseline",
+  "training_mode": "continuous 10 epochs from pretrained t5-small",
+  "epochs_run": 10,
+  "selected_epoch": 10,
+  "best_validation_loss": 0.2306298321390405,
+  "metric": "normalized_exact_match",
+  "correct": 103,
+  "total": 940,
+  "accuracy": 0.10957446808510639,
+  "accuracy_percent": 10.957446808510639,
+  "decoding": "greedy (num_beams=1)",
+  "seed": 42
+}

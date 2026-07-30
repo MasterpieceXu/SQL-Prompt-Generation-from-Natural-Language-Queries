@@ -6,5 +6,7 @@ transformers
 sentencepiece
 torch
 scikit-learn
+matplotlib
 numpy
 tqdm
+pytest

@@ -6,7 +6,7 @@
 - Device: Tesla T4 (`cuda`)
 - Dataset: `AI4DS/sql_generator_no_cot`
 - Cleaned split sizes: 7,517 train / 940 validation / 940 test
-- Approximate end-to-end runtime: 20 minutes
+- Complete test generation: 235 batches (approximately 3 minutes 43 seconds)
 - Best checkpoint criterion: lowest validation loss
 - Downloaded archive: `member2_baseline_output.zip`
 
@@ -30,9 +30,10 @@ The pipeline was tested before the full experiment rather than only at the end:
    backpropagation, validation, checkpoint writing, and prediction CSV generation.
 2. A Kaggle smoke test used 5 training batches, 2 validation batches, and 1 prediction
    batch on a Tesla T4. It completed without CUDA, data, or checkpoint errors.
-3. The full run completed all 3 epochs and all 235 validation batches per epoch.
+3. The full run completed all 10 epochs and all 235 validation batches per epoch.
 4. The downloaded result ZIP passed an integrity check and contained the model weights,
-   tokenizer, model configuration, run configuration, loss log, and predictions.
+   tokenizer, model configuration, run configuration, ten-epoch loss log, 940
+   predictions, and the complete-test metric summary.
 5. Held-out predictions were inspected to confirm that the model learned SQL structure
    and to identify schema-linking and semantic failure cases.
 
@@ -44,7 +45,7 @@ The pipeline was tested before the full experiment rather than only at the end:
 | Optimizer | AdamW |
 | Learning rate | `5e-5` |
 | Batch size | `4` |
-| Epochs | `3` |
+| Epochs | `10` |
 | Random seed | `42` |
 | Maximum input length | `512` |
 | Maximum target length | `256` |
@@ -53,7 +54,7 @@ The pipeline was tested before the full experiment rather than only at the end:
 Equivalent command:
 
 ```bash
-python -m src.baseline --epochs 3 --batch_size 4 --learning_rate 5e-5 --max_prediction_batches 10
+python -m src.baseline --epochs 10 --batch_size 4 --learning_rate 5e-5 --max_prediction_batches 235
 ```
 
 ## Loss History
@@ -63,31 +64,48 @@ python -m src.baseline --epochs 3 --batch_size 4 --learning_rate 5e-5 --max_pred
 | 1 | 1.0610 | 0.5069 |
 | 2 | 0.5774 | 0.3919 |
 | 3 | 0.4640 | 0.3432 |
+| 4 | 0.4006 | 0.3101 |
+| 5 | 0.3571 | 0.2832 |
+| 6 | 0.3254 | 0.2685 |
+| 7 | 0.2992 | 0.2575 |
+| 8 | 0.2794 | 0.2454 |
+| 9 | 0.2626 | 0.2357 |
+| 10 | 0.2487 | 0.2306 |
 
-Both losses decreased across all three epochs. Epoch 3 produced the lowest validation
-loss and was therefore saved as the best checkpoint. These losses are training
-diagnostics, not Text-to-SQL task accuracy.
+Both losses decreased across all ten epochs. Epoch 10 produced the lowest validation
+loss and was therefore saved as the best checkpoint. The validation curve had not fully
+plateaued, but the improvement per epoch was becoming smaller and there was no
+loss-curve evidence of overfitting. These losses are training diagnostics, not
+Text-to-SQL task accuracy.
 
 ![T5-small baseline training and validation loss](figures/member2_baseline_loss.png)
 
-**Figure 1.** Training and validation token-level cross-entropy loss across the three
+**Figure 1.** Training and validation token-level cross-entropy loss across the ten
 baseline epochs. Both series decreased, with no loss-curve evidence of instability or
 overfitting during this short run. Validation loss being lower than training loss is
 plausible because dropout is active during training and disabled during evaluation.
 
 No exploding loss, NaN loss, CUDA out-of-memory error, or increasing validation-loss
-trend was observed. The three-epoch curve therefore provides no evidence of unstable
+trend was observed. The ten-epoch curve therefore provides no evidence of unstable
 training or overfitting. However, semantic SQL errors in the diagnostic predictions
 show that low token loss does not rule out task-level underperformance.
 
-## Prediction Sanity Check
+## Complete Test Evaluation
 
-The script generated 40 predictions from the first 10 test batches. All 40 outputs began
-with `SELECT` and contained `FROM`, so fine-tuning taught the model the broad SQL output
-format. None of the 40 predictions was a literal whitespace-normalised match to its
-target. This small deterministic subset is only a diagnostic check: literal exact match
-is strict and can reject semantically equivalent SQL, while the subset is not the full
-test set.
+The selected epoch-10 checkpoint generated predictions for all 940 examples in the
+held-out test split. Using the shared conservative normalization, 103 predictions
+exactly matched their targets:
+
+| Metric | Result |
+|---|---:|
+| Correct normalized exact matches | 103 |
+| Test examples | 940 |
+| Normalized exact-match accuracy | 10.9574% |
+
+The normalization lowercases SQL, trims leading and trailing whitespace, collapses
+internal whitespace, and removes one trailing semicolon. It remains a strict string
+comparison and can reject semantically equivalent SQL with different aliases, condition
+ordering, or syntax.
 
 Representative error categories observed in the sample:
 
@@ -108,6 +126,7 @@ SQL is not sufficient for semantic correctness.
 
 - `results/baseline_training_log.csv`
 - `results/baseline_predictions.csv`
+- `results/baseline_full_summary.json`
 - `checkpoints/baseline_t5_small/baseline_config.json`
 - `checkpoints/baseline_t5_small/best/model.safetensors`
 - tokenizer and model configuration files for the best checkpoint
@@ -134,17 +153,13 @@ the final baseline-versus-improved comparison.
 
 ## Evaluation Tasks for Member 4
 
-1. Load the `best` checkpoint and generate predictions for the complete 940-example test
-   split.
-2. Report the group's agreed task metrics, such as normalised exact match, SQL validity,
+1. Verify the 940 saved predictions with the shared evaluation implementation.
+2. Report the group's additional agreed task metrics, such as SQL validity,
    and execution accuracy when executable databases are available.
 3. Compare the baseline with the improved model using the same test split and decoding
-   conditions.
+   conditions, and clearly disclose any difference in training budget.
 4. Extend the error analysis using shared categories for schema linking, joins,
    aggregation, filtering, nesting, and invalid SQL.
-
-Do not present the 40-row diagnostic literal-match count as the project's final test
-accuracy.
 
 Regenerate Figure 1 from the recorded values with:
 
