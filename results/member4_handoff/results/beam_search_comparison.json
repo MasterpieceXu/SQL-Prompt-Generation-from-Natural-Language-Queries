@@ -1,0 +1,16 @@
+{
+  "metric": "normalized_exact_match",
+  "comparison": "schema_aware_greedy_vs_schema_aware_beam_8",
+  "paired_predictions": 940,
+  "baseline_file_rows": 940,
+  "improved_file_rows": 940,
+  "baseline_correct": 133,
+  "improved_correct": 166,
+  "baseline_score": 0.141489,
+  "improved_score": 0.176596,
+  "absolute_improvement": 0.035106,
+  "percentage_point_improvement": 3.5106,
+  "baseline_only_correct": 9,
+  "improved_only_correct": 42,
+  "note": "String exact match is diagnostic; execution accuracy should be added by Member 4."
+}

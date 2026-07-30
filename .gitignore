@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.DS_Store
+.idea/
 
 .agents/
 .codex/
@@ -15,6 +17,9 @@ data/
 *.parquet
 !results/baseline_training_log.csv
 !results/baseline_predictions.csv
+!results/member3/*.csv
+!results/member3/v3_full_run/*.csv
+!results/member4_handoff/results/*.csv
 
 checkpoints/*
 !checkpoints/.gitkeep
