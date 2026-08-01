@@ -7,13 +7,18 @@ import torch
 import src.evaluate as evaluate_module
 from src.evaluate import (
     analyze_prediction_error,
+    build_evaluation_batches,
     check_sql_validity,
     evaluate_model,
     evaluate_normalized_exact_match,
     exact_match_score,
     normalize_sql,
     normalized_exact_match,
+    parse_args,
+    raw_exact_match,
     summarize_error_analysis,
+    validate_checkpoint_directory,
+    verify_aligned_results,
 )
 
 
@@ -170,6 +175,11 @@ def test_normalized_exact_match_handles_none_and_empty_string():
     assert normalized_exact_match(None, "")
 
 
+def test_raw_exact_match_does_not_normalize():
+    assert raw_exact_match("SELECT 1", "SELECT 1")
+    assert not raw_exact_match("SELECT 1", "select 1;")
+
+
 def test_evaluate_normalized_exact_match_lists():
     result = evaluate_normalized_exact_match(
         ["SELECT 1", "SELECT id FROM users", None],
@@ -311,7 +321,9 @@ def test_one_complete_evaluation_batch_and_exact_match_counts():
         "predicted_sql": "1",
         "normalized_target_sql": "1",
         "normalized_predicted_sql": "1",
+        "raw_exact_match": True,
         "exact_match": True,
+        "normalized_exact_match": True,
     }
 
 
@@ -566,12 +578,15 @@ def test_evaluate_model_default_output_remains_unchanged():
     )
 
     assert set(result) == {
-        "records", "correct", "total", "accuracy", "elapsed_seconds",
+        "records", "raw_correct", "raw_accuracy", "correct", "total",
+        "accuracy", "normalized_correct", "normalized_accuracy",
+        "inference_seconds", "average_latency_seconds", "elapsed_seconds",
         "examples_per_second", "generation_kwargs",
     }
     assert set(result["records"][0]) == {
         "index", "target_sql", "predicted_sql", "normalized_target_sql",
-        "normalized_predicted_sql", "exact_match",
+        "normalized_predicted_sql", "raw_exact_match", "exact_match",
+        "normalized_exact_match",
     }
 
 
@@ -985,3 +1000,162 @@ def test_error_summary_empty_input():
 def test_error_summary_rejects_malformed_records(records):
     with pytest.raises(ValueError, match="record"):
         summarize_error_analysis(records)
+
+
+def test_evaluate_model_aggregates_unified_metrics():
+    result = evaluate_model(
+        TinyGenerator([[[1, 0], [3, 0]]]),
+        [_batch(target_sql=["select 1;", "SELECT id FROM users"])],
+        SqlTokenizer(),
+        "cpu",
+        include_validity=True,
+        include_error_analysis=True,
+    )
+
+    assert result["raw_correct"] == 0
+    assert result["raw_accuracy"] == 0.0
+    assert result["normalized_correct"] == 1
+    assert result["normalized_accuracy"] == pytest.approx(0.5)
+    assert result["sql_valid_count"] == 1
+    assert result["sql_validity_rate"] == pytest.approx(0.5)
+    assert result["validity_category_counts"] == {
+        "valid": 1,
+        "syntax_error": 1,
+    }
+    assert result["inference_seconds"] >= 0.0
+    assert result["average_latency_seconds"] == pytest.approx(
+        result["inference_seconds"] / 2
+    )
+
+
+class RecordingBatchTokenizer:
+    def __init__(self):
+        self.prompt_batches = []
+
+    def __call__(self, prompts, **kwargs):
+        self.prompt_batches.append((list(prompts), dict(kwargs)))
+        return {
+            "input_ids": torch.arange(len(prompts)).reshape(-1, 1),
+            "attention_mask": torch.ones((len(prompts), 1), dtype=torch.long),
+        }
+
+
+def test_build_evaluation_batches_preserves_example_order():
+    examples = [
+        {
+            "sample_id": sample_id,
+            "prompt": f"prompt-{sample_id}",
+            "target_sql": f"SELECT {sample_id}",
+            "schema_sql": "",
+        }
+        for sample_id in (4, 2, 9)
+    ]
+    tokenizer = RecordingBatchTokenizer()
+
+    batches = build_evaluation_batches(examples, tokenizer, batch_size=2)
+
+    assert [sample for batch in batches for sample in batch["sample_id"]] == [4, 2, 9]
+    assert [target for batch in batches for target in batch["target_sql"]] == [
+        "SELECT 4", "SELECT 2", "SELECT 9",
+    ]
+    assert [prompts for prompts, _kwargs in tokenizer.prompt_batches] == [
+        ["prompt-4", "prompt-2"],
+        ["prompt-9"],
+    ]
+
+
+def test_unified_batch_iterator_tokenizes_lazily_one_batch_at_a_time():
+    examples = [
+        {
+            "sample_id": sample_id,
+            "prompt": f"prompt-{sample_id}",
+            "target_sql": f"SELECT {sample_id}",
+            "schema_sql": "",
+        }
+        for sample_id in (0, 1, 2)
+    ]
+    tokenizer = RecordingBatchTokenizer()
+
+    batches = evaluate_module._iter_evaluation_batches(
+        examples,
+        tokenizer,
+        batch_size=2,
+    )
+
+    assert tokenizer.prompt_batches == []
+    first = next(batches)
+    assert first["sample_id"] == [0, 1]
+    assert [prompts for prompts, _kwargs in tokenizer.prompt_batches] == [
+        ["prompt-0", "prompt-1"],
+    ]
+    second = next(batches)
+    assert second["sample_id"] == [2]
+    assert [prompts for prompts, _kwargs in tokenizer.prompt_batches] == [
+        ["prompt-0", "prompt-1"],
+        ["prompt-2"],
+    ]
+    with pytest.raises(StopIteration):
+        next(batches)
+
+
+def _aligned_result(sample_ids=(0, 1), targets=("SELECT 1", "SELECT 2")):
+    return {
+        "records": [
+            {"sample_id": sample_id, "target_sql": target}
+            for sample_id, target in zip(sample_ids, targets)
+        ]
+    }
+
+
+def test_verify_aligned_results_accepts_identical_order():
+    verify_aligned_results(_aligned_result(), _aligned_result())
+
+
+@pytest.mark.parametrize(
+    "right",
+    [
+        _aligned_result(sample_ids=(1, 0)),
+        _aligned_result(targets=("SELECT 2", "SELECT 1")),
+        {"records": [{"sample_id": 0, "target_sql": "SELECT 1"}]},
+    ],
+)
+def test_verify_aligned_results_rejects_misalignment(right):
+    with pytest.raises(ValueError, match="differ|alignment"):
+        verify_aligned_results(_aligned_result(), right)
+
+
+def test_validate_checkpoint_directory_reports_missing_path(tmp_path):
+    missing = tmp_path / "missing"
+    with pytest.raises(FileNotFoundError, match="Member 2 checkpoint does not exist"):
+        validate_checkpoint_directory(missing, "Member 2")
+
+
+def test_validate_checkpoint_directory_reports_incomplete_path(tmp_path):
+    checkpoint = tmp_path / "incomplete"
+    checkpoint.mkdir()
+    with pytest.raises(ValueError, match="incomplete"):
+        validate_checkpoint_directory(checkpoint, "Member 3")
+
+
+def test_cli_argument_parsing():
+    args = parse_args(
+        [
+            "--member2-checkpoint", "external/member2",
+            "--member3-checkpoint", "external/member3",
+            "--batch-size", "2",
+            "--max-samples", "5",
+            "--seed", "7",
+            "--device", "cpu",
+            "--num-beams", "4",
+            "--max-new-tokens", "128",
+        ]
+    )
+
+    assert args.member2_checkpoint == "external/member2"
+    assert args.member3_checkpoint == "external/member3"
+    assert args.batch_size == 2
+    assert args.max_samples == 5
+    assert args.seed == 7
+    assert args.device == "cpu"
+    assert args.num_beams == 4
+    assert args.max_new_tokens == 128

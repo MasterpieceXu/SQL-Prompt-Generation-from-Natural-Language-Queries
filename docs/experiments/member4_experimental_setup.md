@@ -2,15 +2,10 @@
 
 ## Status
 
-This is the protocol for a future controlled experiment. No new training or model evaluation was run.
-
-Verified implementation-test environment:
-
-| OS | Python | pytest | Device | Result |
-|---|---|---|---|---|
-| Windows | 3.9.13 | 8.4.2 | CPU | **142 passed, 1 skipped** |
-
-The skipped test was CUDA-only. The formal run must capture resolved package versions, Python/PyTorch/CUDA details, hardware, and peak memory.
+The lightweight unified evaluator is prepared for a future controlled run. The two
+trained checkpoint directories are not currently available, so no new model inference
+or final comparison has been performed. The evaluator does not train, download, or
+substitute a model and does not persist per-example predictions.
 
 ## Data
 
@@ -29,37 +24,36 @@ Record truncation counts/rates and token-length summaries separately for each in
 
 ## Controlled comparison
 
-Baseline and improved runs must use:
+The command validates both local checkpoint directories before reading the dataset or
+running inference. It constructs the cleaned, deterministic test split once and passes
+the same ordered sample IDs and reference SQL to both systems. Member 2 receives the
+baseline prompt; Member 3 receives its repository-defined schema-aware prompt. Each
+checkpoint is loaded with its own saved tokenizer and evaluated separately so the first
+model can be released before the second is loaded.
 
-- the same exact pretrained checkpoint and tokenizer revision;
-- the same 7,517/940/940 split, order, and all 940 aligned test rows;
-- identical optimizer, learning rate, batch size, epoch limit, sequence limits, early stopping, and validation-based checkpoint selection;
-- identical evaluation code and normalization;
-- greedy-versus-greedy when isolating prompt design;
-- the same selected model checkpoint when comparing greedy with beam-4;
-- the same hardware and timing protocol for performance comparisons.
-
-Reject incomplete or mismatched prediction files; counts, sample IDs, targets, and order must align exactly. Never compare only a shared prefix.
-
-Record failures, interruptions, resumes, bounded smoke runs, exact environment, Git commit/branch/status, and any uncommitted diff used by the run.
-
-Member 3's summary reports greedy **42/940 = 4.4681%** and beam-4 **46/940 = 4.8936%**. Complete prediction files were absent, so Member 4 did not independently recompute these historical values. They are neither a controlled comparison against Member 2 nor execution accuracy.
+Both runs share the requested seed, batch size, device, beam count, maximum generated
+token count, normalization, validity checker, and timing implementation. Cross-run
+comparison is rejected unless prediction count, sample order, sample IDs, and reference
+SQL match exactly. `--max-samples` is only for a bounded diagnostic run; results from a
+subset must never be reported as the final 940-example comparison.
 
 ## Metrics
 
 | Metric | Reporting rule |
 |---|---|
+| Raw exact match | Byte-for-byte prediction/reference count and percentage |
 | Normalized exact match | Count/940 and percentage |
 | SQL validity | Count/940, rate, and validity categories |
 | Heuristic error analysis | Non-exclusive and primary-category counts |
-| Inference time | Fixed scope, warm-up, repetitions, device, batch, decoding |
-| Throughput | Examples/second under the same timing protocol |
+| Inference time | Time spent in synchronized model generation calls |
+| Average latency | Total inference time divided by evaluated examples |
 
 `Difference` means **Improved − Baseline**. Accuracy and validity differences are reported in **percentage points**.
 
 Because predictions are paired by test example, report a paired-bootstrap confidence interval for the exact-match difference; McNemar's test is optional. If only seed 42 is run, conclusions apply only to that run.
 
-The evaluator measures one invocation with `time.perf_counter()`. The runner must perform warm-up and repeated measurements; synchronize CUDA around timed regions when applicable.
+The evaluator uses `model.eval()` and `torch.inference_mode()`, measures generation with
+`time.perf_counter()`, and synchronizes CUDA immediately around timed generation calls.
 
 SQL validity must use the same schema DDL for both systems. It measures parsing/planning, not semantics. Populated databases are unavailable, so result-set execution accuracy cannot be reported.
 
@@ -72,9 +66,9 @@ SQL validity must use the same schema DDL for both systems. It measures parsing/
 - model/tokenizer revisions and all training, stopping, decoding, device, and precision settings;
 - truncation statistics;
 - epoch history and run logs;
-- complete per-condition JSONL predictions and aggregate summaries;
+- aggregate summaries and only a small number of representative errors in the report;
 - timing protocol and measurements;
-- `best.pt` and `latest.pt` plus hashes and metadata.
+- external checkpoint directory paths plus checkpoint hashes and metadata.
 
 Keep large checkpoints outside Git according to repository policy.
 
@@ -92,7 +86,29 @@ Keep large checkpoints outside Git according to repository policy.
 
 ## Results template — keep empty until the real run
 
-### Run
+### Future full-run command
+
+Run from the repository root after both complete external checkpoint directories are
+available:
+
+```powershell
+python -m src.evaluate `
+  --member2-checkpoint "C:\path\to\member2\best" `
+  --member3-checkpoint "C:\path\to\member3_v3\best" `
+  --batch-size 4 `
+  --seed 42 `
+  --device auto `
+  --num-beams 1 `
+  --max-new-tokens 256
+```
+
+Omit `--max-samples` for the final evaluation. A diagnostic invocation may add
+`--max-samples 5`, but its metrics must not replace full-run results. Output is printed
+to the terminal; per-example predictions stay in memory. Execution Accuracy remains
+unavailable because neither populated databases nor a test-example-to-database mapping
+is present.
+
+### Run record (complete only after the full run)
 
 | Field | Value |
 |---|---|
@@ -123,12 +139,14 @@ Keep large checkpoints outside Git according to repository policy.
 
 | Metric | Baseline | Improved | Improved − Baseline |
 |---|---:|---:|---:|
-| Exact match (count/940) | `<empty>` | `<empty>` | `<empty>` |
-| Exact match (%) | `<empty>` | `<empty>` | `<empty> pp` |
+| Raw exact match (count/940) | `<empty>` | `<empty>` | `<empty>` |
+| Raw exact match (%) | `<empty>` | `<empty>` | `<empty> pp` |
+| Normalized exact match (count/940) | `<empty>` | `<empty>` | `<empty>` |
+| Normalized exact match (%) | `<empty>` | `<empty>` | `<empty> pp` |
 | SQL valid (count/940) | `<empty>` | `<empty>` | `<empty>` |
 | SQL validity (%) | `<empty>` | `<empty>` | `<empty> pp` |
 | Inference time (s) | `<empty>` | `<empty>` | `<empty>` |
-| Throughput (examples/s) | `<empty>` | `<empty>` | `<empty>` |
+| Average latency (s/example) | `<empty>` | `<empty>` | `<empty>` |
 
 ### Paired exact match
 
