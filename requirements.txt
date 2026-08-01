@@ -10,3 +10,4 @@ matplotlib
 numpy
 tqdm
 pytest
+sqlglot==30.13.0

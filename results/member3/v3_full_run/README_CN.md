@@ -6,6 +6,7 @@
 ## 核心结果
 
 - 最佳验证结果：Epoch 8，143/940，Normalised Exact Match = 15.21%
+- 最终测试集 SQLGlot Validity Rate：849/940 = 90.32%
 - V3 Schema-aware Greedy：133/940，Normalised Exact Match = 14.15%
 - V3 Beam 8 + Schema 重排序：166/940，Normalised Exact Match = 17.66%
 - Beam 相比 Greedy：增加 33 条，绝对提升 3.51 个百分点
@@ -20,6 +21,8 @@
 - `improved_predictions.csv`：完整 940 条 Beam 8 + Schema 重排序预测
 - `beam_search_comparison.json`：两种解码方法的配对统计
 - `baseline_v3_comparison.json`：Member 2 Baseline 与 V3 的完整940条配对统计
+- `sqlglot_validity_comparison.json`：Baseline、V2、V3 Greedy 和 V3 最终方法的 SQLGlot Validity Rate
+- `v3_sqlglot_validity.csv`：最终940条预测的逐条 SQLGlot 有效性与解析错误
 
 ## 给 Member 4
 

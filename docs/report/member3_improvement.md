@@ -205,6 +205,25 @@ V3 最终方法相较 V2 最终方法从 98/940 提高到 166/940，增加 68 �
 2. **SQL Validity**：SQL 是否满足语法与 Schema 约束；
 3. **Execution Accuracy**：预测 SQL 与参考 SQL 的执行结果是否相同。
 
+### 6.1 SQLGlot SQL Validity Rate
+
+本项目新增 `SQLGlot Validity Rate` 作为第二项自动指标。对每条预测使用 SQLGlot 30.13.0
+按 SQLite 方言解析；预测必须非空、只能包含一条语句，而且顶层必须是查询表达式。满足这些
+条件记为 Valid。该指标不读取数据库实例，不验证表名和列名是否存在，也不执行 SQL，因此
+只能反映语法与基本查询结构是否可解析。
+
+| 系统 | Valid SQL | SQLGlot Validity Rate |
+|---|---:|---:|
+| Member 2 Baseline Greedy | 829/940 | 88.19% |
+| Member 3 V2 Beam + Schema 重排序 | 822/940 | 87.45% |
+| Member 3 V3 Greedy | 836/940 | 88.94% |
+| **Member 3 V3 Beam + Schema 重排序** | **849/940** | **90.32%** |
+
+V3 最终方法比 Member 2 Baseline 多生成20条可解析查询，Validity Rate 绝对提高2.13个百分点；
+相较 V2 提高2.87个百分点。V3 的 Beam + Schema 重排序又比同一模型的 Greedy 多13条可解析
+查询，提高1.38个百分点。V3 仍有91/940条预测因 SQLGlot Parse Error 判为无效，说明语法
+稳定性已经较高但仍有改进空间。
+
 不建议把三种含义不同的指标简单平均。Member 4 应优先使用
 `results/member3/v3_full_run/improved_predictions.csv` 进行 SQL Validity、Execution
 Accuracy 和错误类型分析，并可使用同目录下的 Greedy 文件进行配对消融。
@@ -239,7 +258,10 @@ V3 交付目录包含：
 - `improved_predictions.csv`：完整 940 条最终 Beam + Schema 重排序预测；
 - `beam_search_comparison.json`：Greedy 与最终方法的配对统计；
 - `baseline_v3_comparison.json`：Member 2 Baseline 与 V3 的完整940条配对统计；
+- `sqlglot_validity_comparison.json`：Baseline、V2、V3 Greedy 与 V3 最终方法的 SQL Validity Rate；
+- `v3_sqlglot_validity.csv`：V3 最终940条预测的逐条 SQLGlot 有效性和解析错误；
 - `docs/experiments/plot_member3_training_trends.py`：读取正式 CSV 并重新生成趋势图；
+- `docs/experiments/evaluate_member3_sql_validity.py`：重新计算 SQLGlot Validity Rate；
 - `docs/experiments/figures/member3_training_trends.png`：报告使用的训练趋势图；
 - `README_CN.md`：结果说明与 Member 4 使用建议。
 

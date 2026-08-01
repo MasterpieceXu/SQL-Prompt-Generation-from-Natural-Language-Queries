@@ -17,6 +17,7 @@
 - V3 相比 V2：增加 68 条，绝对提升 7.23 个百分点，相对提升约 69.39%
 - Member 2 Baseline：103/940（10.96%）
 - V3 相比 Baseline：增加63条，绝对提升6.70个百分点，相对提升约61.17%
+- V3 SQLGlot Validity Rate：849/940（90.32%），比 Baseline 高2.13个百分点
 
 ## V3 文件
 
@@ -25,6 +26,8 @@
 - `v3_full_run/improved_predictions.csv`
 - `v3_full_run/beam_search_comparison.json`
 - `v3_full_run/baseline_v3_comparison.json`
+- `v3_full_run/sqlglot_validity_comparison.json`
+- `v3_full_run/v3_sqlglot_validity.csv`
 - `v3_full_run/README_CN.md`
 - `../../docs/experiments/figures/member3_training_trends.png`：Baseline/V3 Loss 与 V3 验证 EM 趋势图
 
