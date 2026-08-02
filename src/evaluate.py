@@ -119,6 +119,109 @@ def _sqlite_error_category(message: str) -> str:
     return "execution_error"
 
 
+_CREATE_TABLE_START = re.compile(
+    r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
+    r"(?:[A-Za-z_]\w*|\"(?:[^\"]|\"\")+\"|`[^`]+`|\[[^\]]+\])"
+    r"(?:\s*\.\s*(?:[A-Za-z_]\w*|\"(?:[^\"]|\"\")+\"|`[^`]+`|\[[^\]]+\]))?"
+    r"\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _sqlite_compatible_schema(schema_sql: str) -> str:
+    code_positions = [False] * len(schema_sql)
+    index = 0
+    state = "code"
+    while index < len(schema_sql):
+        character = schema_sql[index]
+        following = schema_sql[index + 1] if index + 1 < len(schema_sql) else ""
+
+        if state == "line_comment":
+            if character in "\r\n":
+                state = "code"
+        elif state == "block_comment":
+            if character == "*" and following == "/":
+                state = "code"
+                index += 2
+                continue
+        elif state in {"single_quote", "double_quote", "backtick"}:
+            delimiter = {
+                "single_quote": "'",
+                "double_quote": '"',
+                "backtick": "`",
+            }[state]
+            if character == delimiter:
+                if following == delimiter:
+                    index += 2
+                    continue
+                state = "code"
+        elif state == "bracket":
+            if character == "]":
+                state = "code"
+        elif character == "-" and following == "-":
+            state = "line_comment"
+            index += 2
+            continue
+        elif character == "/" and following == "*":
+            state = "block_comment"
+            index += 2
+            continue
+        elif character in "'\"`[":
+            state = {
+                "'": "single_quote",
+                '"': "double_quote",
+                "`": "backtick",
+                "[": "bracket",
+            }[character]
+        else:
+            code_positions[index] = True
+        index += 1
+
+    if state not in {"code", "line_comment"}:
+        return schema_sql
+
+    removals: list[int] = []
+    for match in _CREATE_TABLE_START.finditer(schema_sql):
+        opening_index = match.end() - 1
+        if not code_positions[match.start()] or not code_positions[opening_index]:
+            continue
+
+        depth = 0
+        last_top_level_code: int | None = None
+        closing_index: int | None = None
+        for cursor in range(opening_index, len(schema_sql)):
+            if not code_positions[cursor]:
+                continue
+            character = schema_sql[cursor]
+            if character == "(":
+                if depth == 1:
+                    last_top_level_code = cursor
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    closing_index = cursor
+                    break
+                if depth == 1:
+                    last_top_level_code = cursor
+            elif depth == 1 and not character.isspace():
+                last_top_level_code = cursor
+
+        if closing_index is None:
+            return schema_sql
+        if last_top_level_code is not None and schema_sql[last_top_level_code] == ",":
+            removals.append(last_top_level_code)
+
+    if not removals:
+        return schema_sql
+    removal_set = set(removals)
+    return "".join(
+        character
+        for position, character in enumerate(schema_sql)
+        if position not in removal_set
+    )
+
+
 def check_sql_validity(
     predicted_sql: str | None,
     schema_sql: str | None = None,
@@ -166,7 +269,7 @@ def check_sql_validity(
                         else sqlite3.SQLITE_OK
                     )
                 )
-                connection.executescript(str(schema_sql))
+                connection.executescript(_sqlite_compatible_schema(str(schema_sql)))
             except sqlite3.Error as error:
                 return _validity_result(False, "schema_error", str(error))
 

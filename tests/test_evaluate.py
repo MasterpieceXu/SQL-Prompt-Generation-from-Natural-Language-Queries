@@ -6,6 +6,7 @@ import torch
 
 import src.evaluate as evaluate_module
 from src.evaluate import (
+    _sqlite_compatible_schema,
     analyze_prediction_error,
     build_evaluation_batches,
     check_sql_validity,
@@ -79,6 +80,83 @@ def test_sql_validity_invalid_schema():
     assert result["valid"] is False
     assert result["category"] == "schema_error"
     assert result["error_message"]
+
+
+def test_sql_validity_repairs_single_create_table_trailing_comma():
+    schema = "CREATE TABLE users (id INTEGER, name TEXT,);"
+
+    result = check_sql_validity("SELECT id, name FROM users", schema)
+
+    assert result["valid"] is True
+
+
+def test_sql_validity_repairs_multiple_create_table_trailing_commas():
+    schema = """
+    CREATE TABLE users (id INTEGER,);
+    CREATE TABLE orders (id INTEGER, user_id INTEGER,);
+    """
+
+    result = check_sql_validity(
+        "SELECT orders.id FROM orders JOIN users ON users.id = orders.user_id",
+        schema,
+    )
+
+    assert result["valid"] is True
+
+
+def test_sqlite_compatible_schema_preserves_legal_ddl():
+    assert _sqlite_compatible_schema(SCHEMA_SQL) == SCHEMA_SQL
+
+
+def test_sql_validity_repairs_trailing_comma_after_column_constraint():
+    schema = """
+    CREATE TABLE users (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE, -- required value
+    );
+    """
+
+    result = check_sql_validity("SELECT name FROM users", schema)
+
+    assert result["valid"] is True
+
+
+def test_sql_validity_does_not_rewrite_candidate_sql():
+    schema = "CREATE TABLE users (id INTEGER,);"
+
+    result = check_sql_validity("SELECT id, FROM users", schema)
+
+    assert result["valid"] is False
+    assert result["category"] == "syntax_error"
+
+
+@pytest.mark.parametrize(
+    ("sql", "category"),
+    [
+        ("SELECT * FROM absent", "missing_table"),
+        ("SELECT absent_column FROM users", "missing_column"),
+        ("SELECT FROM users", "syntax_error"),
+    ],
+)
+def test_sql_validity_categories_after_schema_repair(sql, category):
+    result = check_sql_validity(sql, "CREATE TABLE users (id INTEGER,);")
+
+    assert result["valid"] is False
+    assert result["category"] == category
+
+
+def test_sql_validity_preserves_unrecognized_dangerous_schema_failure(tmp_path):
+    database_path = tmp_path / "unrecognized.sqlite"
+    schema = f"""
+    CREATE TABLE users (id INTEGER,
+    ATTACH DATABASE '{database_path}' AS external;
+    """
+
+    result = check_sql_validity("SELECT 1", schema)
+
+    assert result["valid"] is False
+    assert result["category"] == "schema_error"
+    assert not database_path.exists()
 
 
 def test_sql_validity_rejects_multiple_statements():
