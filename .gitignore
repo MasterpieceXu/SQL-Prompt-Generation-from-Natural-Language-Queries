@@ -21,3 +21,11 @@ checkpoints/*
 *.pth
 *.bin
 *.safetensors
+
+# LaTeX source and build artifacts for the evaluation solution
+/sql_evaluation_solution.tex
+/sql_evaluation_solution.aux
+/sql_evaluation_solution.log
+/sql_evaluation_solution.out
+/sql_evaluation_solution.synctex.gz
+/sql_evaluation_solution.pdf
