@@ -6,5 +6,8 @@ transformers
 sentencepiece
 torch
 scikit-learn
+matplotlib
 numpy
 tqdm
+pytest
+sqlglot==30.13.0

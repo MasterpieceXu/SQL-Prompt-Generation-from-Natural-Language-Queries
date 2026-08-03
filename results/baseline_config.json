@@ -1,0 +1,16 @@
+{
+  "model_name": "t5-small",
+  "learning_rate": 5e-05,
+  "batch_size": 4,
+  "epochs": 10,
+  "seed": 42,
+  "device": "cuda",
+  "max_input_length": 512,
+  "max_target_length": 256,
+  "split_sizes": {
+    "train": 7517,
+    "validation": 940,
+    "test": 940
+  },
+  "num_beams": 1
+}

@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.DS_Store
+.idea/
 
 .agents/
 .codex/
@@ -13,6 +15,11 @@ env/
 data/
 *.csv
 *.parquet
+!results/baseline_training_log.csv
+!results/baseline_predictions.csv
+!results/member3/*.csv
+!results/member3/v3_full_run/*.csv
+!results/member4_handoff/results/*.csv
 
 checkpoints/*
 !checkpoints/.gitkeep
@@ -22,10 +29,5 @@ checkpoints/*
 *.bin
 *.safetensors
 
-# LaTeX source and build artifacts for the evaluation solution
-/sql_evaluation_solution.tex
-/sql_evaluation_solution.aux
-/sql_evaluation_solution.log
-/sql_evaluation_solution.out
-/sql_evaluation_solution.synctex.gz
-/sql_evaluation_solution.pdf
+# Member handoff archives are shared outside GitHub.
+results/member4_handoff.zip
