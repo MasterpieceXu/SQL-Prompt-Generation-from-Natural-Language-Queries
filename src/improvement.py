@@ -27,7 +27,6 @@ from src.config import (
     RANDOM_SEED,
     RESULTS_DIR,
 )
-from checkpoints.member3_v3_checkpoint_corrected.load_verified_checkpoint import load_verified_checkpoint
 
 
 _SCHEMA_HEADING = re.compile(r"(?im)^\s*Database\s+Schema\s*$")
@@ -432,9 +431,7 @@ def load_improved_model(model_name: str = BASELINE_MODEL_NAME):
             "Missing dependency: transformers. Install requirements.txt before training."
         ) from exc
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name,
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForSeq2SeqLM.from_pretrained(model_name)
     return tokenizer, model
 
@@ -591,11 +588,7 @@ def write_improved_predictions(
                     start = row_index * beam_count
                     end = start + beam_count
                     schema_index = rows_written + row_index
-                    schema = (
-                         schemas[schema_index]
-                         if schemas is not None and schema_index < len(schemas)
-                         else ""
-                    )
+                    schema = schemas[schema_index] if schema_index < len(schemas) else ""
                     candidates = decoded_candidates[start:end]
                     scores = sequence_scores[start:end]
                     if schema:
@@ -917,20 +910,8 @@ def train_improved_model(args: argparse.Namespace) -> dict[str, Any]:
 
     set_seed(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
-    
     tokenizer, model = load_improved_model(args.model_name)
     model.to(device)
-    
-    if args.predict_only:
-        checkpoint_path = Path("checkpoints/member3_v3_checkpoint_corrected/best")
-        """
-        tokenizer, model = load_improved_model(str(checkpoint_path))
-        """
-        tokenizer, model = load_verified_checkpoint(checkpoint_path)
-    else:
-        tokenizer, model = load_improved_model(args.model_name)
-    model.to(device)
-
     train_loader, val_loader, test_loader, metadata = prepare_improved_dataloaders(
         tokenizer,
         args.batch_size,
@@ -1000,7 +981,6 @@ def train_improved_model(args: argparse.Namespace) -> dict[str, Any]:
         json.dumps(config, indent=2),
         encoding="utf-8",
     )
-   
 
     history: list[dict[str, float | int]] = []
     best_val_loss = float("inf")
@@ -1083,24 +1063,15 @@ def train_improved_model(args: argparse.Namespace) -> dict[str, Any]:
             "best_epoch": best_epoch,
             "best_validation_exact_match": best_val_exact_match,
             "best_validation_loss": best_val_loss,
-        } 
+        }
     )
     (run_dir / "improved_config.json").write_text(
         json.dumps(config, indent=2),
         encoding="utf-8",
     )
 
-    if args.predict_only:
-        best_dir = Path("checkpoints/member3_v3_checkpoint_corrected/best")
-    
-
     # Reload the validation-selected checkpoint rather than assuming the final epoch is best.
-    #best_tokenizer, best_model = load_improved_model(str(best_dir))
-    if args.predict_only:
-        best_tokenizer, best_model = tokenizer, model
-    else:
-        best_tokenizer, best_model = load_improved_model(str(best_dir))
-
+    best_tokenizer, best_model = load_improved_model(str(best_dir))
     best_model.to(device)
     best_model.config.use_cache = True
     greedy_prediction_path = results_dir / "improved_greedy_predictions.csv"
@@ -1235,11 +1206,6 @@ def parse_args() -> argparse.Namespace:
         help="Compare existing baseline/improved CSV files without training.",
     )
     parser.add_argument(
-        "--predict_only",
-        action="store_true",
-        help="Load the existing Member 3 checkpoint and generate predictions without training.",
-    )
-    parser.add_argument(
         "--improved_predictions",
         default=str(Path(RESULTS_DIR) / "improved_predictions.csv"),
         help="Used with --compare_only.",
@@ -1256,11 +1222,7 @@ def main() -> None:
             Path(args.results_dir) / "improvement_comparison.json",
         )
         print(json.dumps(summary, indent=2))
-        return    
-
-    if args.predict_only:
-        args.epochs = 0
-
+        return
     train_improved_model(args)
 
 
