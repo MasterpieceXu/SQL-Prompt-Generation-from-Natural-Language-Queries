@@ -27,6 +27,7 @@ from src.config import (
     RANDOM_SEED,
     RESULTS_DIR,
 )
+from src.member3_checkpoint import load_verified_checkpoint, sha256_file
 
 
 _SCHEMA_HEADING = re.compile(r"(?im)^\s*Database\s+Schema\s*$")
@@ -523,6 +524,84 @@ def prepare_improved_dataloaders(
         ],
     }
     return train_loader, val_loader, test_loader, metadata
+
+
+def prepare_improved_test_dataloader(
+    tokenizer,
+    batch_size: int,
+    dataset_path: str = DATASET_PATH,
+    canonicalize_targets: bool = True,
+):
+    """Create only the deterministic test DataLoader used for checkpoint inference.
+
+    Unlike :func:`prepare_improved_dataloaders`, this function does not tokenise the
+    training or validation splits. It preserves the same cleaning, random seed, test
+    order, target formatting, and schema-aware input used by the formal V3 run.
+    """
+    try:
+        import pandas as pd
+        from datasets import Dataset
+        from torch.utils.data import DataLoader
+        from transformers import DataCollatorForSeq2Seq
+    except ImportError as exc:  # pragma: no cover - depends on runtime environment
+        raise RuntimeError("Missing prediction dependencies. Install requirements.txt.") from exc
+
+    from src.data_prepare import clean_dataset, split_dataset
+
+    clean_df = clean_dataset(pd.read_csv(dataset_path))
+    _, _, test_df = split_dataset(clean_df)
+    test_df = test_df.copy()
+    raw_test_prompts = test_df["prompt"].tolist()
+    test_schemas = [
+        extract_prompt_sections(prompt).get("schema", "")
+        for prompt in raw_test_prompts
+    ]
+    if canonicalize_targets:
+        test_df["sql"] = test_df["sql"].map(canonicalize_target_sql)
+    improved_test = _apply_schema_aware_format(test_df)
+
+    dataset = Dataset.from_pandas(improved_test, preserve_index=False)
+
+    def preprocess_function(examples):
+        model_inputs = tokenizer(
+            examples["prompt"],
+            max_length=MAX_INPUT_LENGTH,
+            truncation=True,
+        )
+        labels = tokenizer(
+            text_target=examples["sql"],
+            max_length=MAX_TARGET_LENGTH,
+            truncation=True,
+        )
+        model_inputs["labels"] = labels["input_ids"]
+        return model_inputs
+
+    tokenized_test = dataset.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=["prompt", "sql"],
+    )
+    data_collator = DataCollatorForSeq2Seq(
+        tokenizer=tokenizer,
+        padding=True,
+        return_tensors="pt",
+    )
+    test_loader = DataLoader(
+        tokenized_test,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=data_collator,
+        num_workers=0,
+    )
+    metadata = {
+        "clean_rows": len(clean_df),
+        "test_rows": len(improved_test),
+        "seed": RANDOM_SEED,
+        "target_canonicalization": canonicalize_targets,
+        "max_input_length": MAX_INPUT_LENGTH,
+        "max_target_length": MAX_TARGET_LENGTH,
+    }
+    return test_loader, test_schemas, metadata
 
 
 def _decode_labels(labels, tokenizer) -> list[str]:
@@ -1155,8 +1234,113 @@ def train_improved_model(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def predict_from_checkpoint(args: argparse.Namespace) -> dict[str, Any]:
+    """Load a completed checkpoint and reproduce Member 3 predictions without training."""
+    if not args.checkpoint_path:
+        raise ValueError("--checkpoint_path is required with --predict_only")
+
+    try:
+        import torch
+    except ImportError as exc:  # pragma: no cover - depends on runtime environment
+        raise RuntimeError("Missing dependency: torch. Install requirements.txt.") from exc
+
+    from src.baseline import set_seed
+
+    set_seed(args.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
+    checkpoint_path = Path(args.checkpoint_path).expanduser().resolve()
+    tokenizer, model = load_verified_checkpoint(
+        checkpoint_path,
+        device=device,
+        expected_model_sha256=args.expected_model_sha256,
+    )
+    if hasattr(model, "config"):
+        model.config.use_cache = True
+
+    test_loader, test_schemas, dataset_metadata = prepare_improved_test_dataloader(
+        tokenizer,
+        args.batch_size,
+        args.dataset_path,
+        canonicalize_targets=args.canonicalize_targets,
+    )
+    greedy_generation_args = configure_generation_strategy(
+        num_beams=1,
+        max_length=MAX_TARGET_LENGTH,
+        length_penalty=args.length_penalty,
+        repetition_penalty=args.repetition_penalty,
+    )
+    beam_generation_args = configure_generation_strategy(
+        num_beams=args.num_beams,
+        max_length=MAX_TARGET_LENGTH,
+        length_penalty=args.length_penalty,
+        repetition_penalty=args.repetition_penalty,
+    )
+
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    greedy_prediction_path = results_dir / "improved_greedy_predictions.csv"
+    prediction_path = results_dir / "improved_predictions.csv"
+
+    greedy_prediction_count = write_improved_predictions(
+        model,
+        tokenizer,
+        test_loader,
+        device,
+        greedy_prediction_path,
+        greedy_generation_args,
+        max_prediction_batches=args.max_prediction_batches,
+    )
+    prediction_count = write_improved_predictions(
+        model,
+        tokenizer,
+        test_loader,
+        device,
+        prediction_path,
+        beam_generation_args,
+        max_prediction_batches=args.max_prediction_batches,
+        schemas=test_schemas,
+        schema_rerank_weight=args.schema_rerank_weight,
+    )
+    beam_comparison = compare_with_baseline(
+        greedy_prediction_path,
+        prediction_path,
+        results_dir / "beam_search_comparison.json",
+        baseline_label="schema_aware_greedy",
+        improved_label=f"schema_aware_beam_{args.num_beams}",
+    )
+
+    model_path = checkpoint_path / "model.safetensors"
+    dataset_file = Path(args.dataset_path).expanduser()
+    summary = {
+        "mode": "predict_only",
+        "training_performed": False,
+        "checkpoint_path": str(checkpoint_path),
+        "model_sha256": sha256_file(model_path),
+        "dataset_path": str(args.dataset_path),
+        "dataset_sha256": sha256_file(dataset_file) if dataset_file.is_file() else None,
+        "device": str(device),
+        "greedy_prediction_count": greedy_prediction_count,
+        "prediction_count": prediction_count,
+        "greedy_output": str(greedy_prediction_path),
+        "beam_output": str(prediction_path),
+        "greedy_generation": greedy_generation_args,
+        "beam_generation": beam_generation_args,
+        "schema_rerank_weight": args.schema_rerank_weight,
+        "max_prediction_batches": args.max_prediction_batches,
+        **dataset_metadata,
+        "beam_search": beam_comparison,
+    }
+    manifest_path = results_dir / "prediction_manifest.json"
+    manifest_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    print(f"Prediction-only run complete; no training was performed: {prediction_path}")
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train and compare Member 3 improvements.")
+    parser = argparse.ArgumentParser(
+        description="Train, reproduce, or compare Member 3 improvements."
+    )
     parser.add_argument("--model_name", default="google/flan-t5-base")
     parser.add_argument("--dataset_path", default=DATASET_PATH)
     parser.add_argument("--learning_rate", type=float, default=1e-4)
@@ -1206,6 +1390,21 @@ def parse_args() -> argparse.Namespace:
         help="Compare existing baseline/improved CSV files without training.",
     )
     parser.add_argument(
+        "--predict_only",
+        action="store_true",
+        help="Load an existing checkpoint and generate predictions without training.",
+    )
+    parser.add_argument(
+        "--checkpoint_path",
+        default=None,
+        help="Local Hugging Face checkpoint directory required by --predict_only.",
+    )
+    parser.add_argument(
+        "--expected_model_sha256",
+        default=None,
+        help="Optional model.safetensors SHA-256 checked before prediction.",
+    )
+    parser.add_argument(
         "--improved_predictions",
         default=str(Path(RESULTS_DIR) / "improved_predictions.csv"),
         help="Used with --compare_only.",
@@ -1215,6 +1414,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.compare_only and args.predict_only:
+        raise SystemExit("--compare_only and --predict_only cannot be used together")
     if args.compare_only:
         summary = compare_with_baseline(
             args.baseline_predictions,
@@ -1222,6 +1423,9 @@ def main() -> None:
             Path(args.results_dir) / "improvement_comparison.json",
         )
         print(json.dumps(summary, indent=2))
+        return
+    if args.predict_only:
+        predict_from_checkpoint(args)
         return
     train_improved_model(args)
 

@@ -3,6 +3,7 @@ datasets
 fsspec
 huggingface_hub
 transformers
+safetensors
 sentencepiece
 torch
 scikit-learn
