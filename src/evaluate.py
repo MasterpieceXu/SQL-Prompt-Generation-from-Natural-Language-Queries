@@ -14,8 +14,6 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
-import sqlglot
-from sqlglot.errors import ParseError
 import torch
 
 
@@ -107,43 +105,6 @@ def _validity_result(
         "error_message": error_message,
     }
 
-def check_sqlglot_validity(
-    predicted_sql: str | None,
-) -> dict[str, bool | str | None]:
-    """
-    Check whether SQLGlot can parse the SQL.
-    """
-
-    if predicted_sql is None or not str(predicted_sql).strip():
-        return _validity_result(
-            False,
-            "empty_sql",
-            "SQL is empty",
-        )
-
-    try:
-        sqlglot.parse_one(str(predicted_sql))
-
-        return _validity_result(
-            True,
-            "valid",
-        )
-
-    except ParseError as error:
-
-        return _validity_result(
-            False,
-            "parse_error",
-            str(error),
-        )
-
-    except Exception as error:
-
-        return _validity_result(
-            False,
-            "error",
-            str(error),
-        )
 
 def _sqlite_error_category(message: str) -> str:
     lowered = message.lower()
@@ -884,26 +845,16 @@ def evaluate_model(
                     record[field_name] = values[offset]
 
                 validity_result = None
-                sqlglot_validity_result = None
                 if include_validity or include_error_analysis:
                     validity_result = check_sql_validity(
                         predicted_sql,
                         schemas[offset],
                     )
-                    sqlglot_validity_result = check_sqlglot_validity(
-                        predicted_sql,
-                    )
-
                 if include_validity:
-                    assert validity_result is not None
-                    assert sqlglot_validity_result is not None
                     record["validity_result"] = validity_result
                     record["sql_valid"] = validity_result["valid"]
                     record["validity_category"] = validity_result["category"]
                     record["validity_error_message"] = validity_result["error_message"]
-                    record["sqlglot_valid"] = sqlglot_validity_result["valid"]
-                    record["sqlglot_category"] = sqlglot_validity_result["category"]
-                    record["sqlglot_error_message"] = sqlglot_validity_result["error_message"]
                 if include_error_analysis:
                     analysis = analyze_prediction_error(
                         target_sql,
@@ -942,25 +893,14 @@ def evaluate_model(
     }
     if include_validity:
         valid_count = sum(bool(record["sql_valid"]) for record in records)
-        sqlglot_valid_count = sum(
-            bool(record["sqlglot_valid"])
-            for record in records
-        )
-
-        sqlglot_validity_rate = (
-            sqlglot_valid_count / total
-            if total else 0.0
-        )
         validity_categories: dict[str, int] = {}
         for record in records:
             category = str(record["validity_category"])
             validity_categories[category] = validity_categories.get(category, 0) + 1
         result.update(
             {
-                "sql_valid_count": valid_count, 
+                "sql_valid_count": valid_count,
                 "sql_validity_rate": valid_count / total if total else 0.0,
-                "sqlglot_valid_count": sqlglot_valid_count,
-                "sqlglot_validity_rate": sqlglot_validity_rate,
                 "validity_category_counts": validity_categories,
             }
         )
@@ -1161,37 +1101,14 @@ def _evaluate_local_checkpoint(
     device: torch.device,
     generation_kwargs: Mapping[str, Any],
 ) -> dict[str, Any]:
-    print("USING MODIFIED EVALUATE.PY")
-
     if member3:
-        import importlib.util
-        loader_path = checkpoint.parent / "load_verified_checkpoint.py"
-        spec = importlib.util.spec_from_file_location(
-            "member3_verified_loader",
-            loader_path,
-        )
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Cannot load Member 3 loader: {loader_path}")
+        from src.improvement import load_improved_model
 
-        loader_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(loader_module)
-
-        tokenizer, model = loader_module.load_verified_checkpoint(
-            checkpoint,
-            device=str(device),
-        )
+        tokenizer, model = load_improved_model(str(checkpoint))
     else:
-        #from src.baseline import load_baseline_model
-        #tokenizer, model = load_baseline_model(str(checkpoint))
-        from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-        tokenizer = AutoTokenizer.from_pretrained(
-            str(checkpoint),
-            legacy=False,
-            extra_special_tokens={},
-        )
-        model = AutoModelForSeq2SeqLM.from_pretrained(str(checkpoint))
+        from src.baseline import load_baseline_model
 
-      
+        tokenizer, model = load_baseline_model(str(checkpoint))
 
     try:
         batches = _iter_evaluation_batches(
@@ -1206,11 +1123,6 @@ def _evaluate_local_checkpoint(
             tokenizer,
             device,
             generation_kwargs=generation_kwargs,
-            output_path=(
-                "member3_predictions.jsonl"
-                if member3
-                else "member2_predictions.jsonl"
-            ),
             include_validity=True,
             include_error_analysis=True,
         )
@@ -1233,7 +1145,7 @@ def _print_side_by_side(
         ("Examples", member2["total"], member3["total"]),
         ("Raw Exact Match", f"{member2['raw_correct']}/{member2['total']} ({member2['raw_accuracy']:.4%})", f"{member3['raw_correct']}/{member3['total']} ({member3['raw_accuracy']:.4%})"),
         ("Normalized Exact Match", f"{member2['normalized_correct']}/{member2['total']} ({member2['normalized_accuracy']:.4%})", f"{member3['normalized_correct']}/{member3['total']} ({member3['normalized_accuracy']:.4%})"),
-        ("SQLGlot Validity Rate", f"{member2['sqlglot_valid_count']}/{member2['total']} ({member2['sqlglot_validity_rate']:.4%})", f"{member3['sqlglot_valid_count']}/{member3['total']} ({member3['sqlglot_validity_rate']:.4%})"),
+        ("SQL Validity Rate", f"{member2['sql_valid_count']}/{member2['total']} ({member2['sql_validity_rate']:.4%})", f"{member3['sql_valid_count']}/{member3['total']} ({member3['sql_validity_rate']:.4%})"),
         ("Inference time (s)", f"{member2['inference_seconds']:.4f}", f"{member3['inference_seconds']:.4f}"),
         ("Average latency (s)", f"{member2['average_latency_seconds']:.6f}", f"{member3['average_latency_seconds']:.6f}"),
     )
@@ -1253,8 +1165,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the aligned, in-memory Member 2 versus Member 3 evaluation."
     )
-    parser.add_argument("--member2-checkpoint", required=False)
-    parser.add_argument("--member3-checkpoint", required=False)
+    parser.add_argument("--member2-checkpoint", required=True)
+    parser.add_argument("--member3-checkpoint", required=True)
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--seed", type=int, default=42)
@@ -1280,23 +1192,12 @@ def run_unified_evaluation(args: argparse.Namespace) -> dict[str, Any]:
     if args.max_new_tokens < 1:
         raise ValueError("max_new_tokens must be at least 1")
 
-    member2_checkpoint = (
-        validate_checkpoint_directory(args.member2_checkpoint, "Member 2")
-        if args.member2_checkpoint is not None
-        else None        
+    member2_checkpoint = validate_checkpoint_directory(
+        args.member2_checkpoint, "Member 2"
     )
-
-    member3_checkpoint = (
-        validate_checkpoint_directory(args.member3_checkpoint, "Member 3")
-        if args.member3_checkpoint is not None
-        else None
+    member3_checkpoint = validate_checkpoint_directory(
+        args.member3_checkpoint, "Member 3"
     )
-
-    if member2_checkpoint is None and member3_checkpoint is None:
-        raise ValueError(
-            "Provide at least one checkpoint: "
-            "--member2-checkpoint or --member3-checkpoint"
-        )
     device = _resolve_device(args.device)
 
     from src.baseline import set_seed
@@ -1316,40 +1217,24 @@ def run_unified_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         "num_beams": args.num_beams,
         "max_new_tokens": args.max_new_tokens,
     }
-    member2 = None
-    member3 = None
-    if member2_checkpoint is not None:
-        member2 = _evaluate_local_checkpoint(
-            member2_checkpoint,
-            examples,
-            member3=False,
-            batch_size=args.batch_size,
-            device=device,
-            generation_kwargs=generation_kwargs,
-        )
-    if member3_checkpoint is not None:
-        member3 = _evaluate_local_checkpoint(
-            member3_checkpoint,
-            examples,
-            member3=True,
-            batch_size=args.batch_size,
-            device=device,
-            generation_kwargs=generation_kwargs,
-      )
-    
-
-    if member2 is not None and member3 is not None:
-        verify_aligned_results(member2, member3)
-        _print_side_by_side(member2, member3)
-    elif member2 is not None:
-        print("Member 2 evaluation completed.")
-        print(json.dumps(member2, indent=2, ensure_ascii=False))
-
-    elif member3 is not None:
-        print("Member 3 evaluation completed.")
-        print(json.dumps(member3, indent=2, ensure_ascii=False))
-
-
+    member2 = _evaluate_local_checkpoint(
+        member2_checkpoint,
+        examples,
+        member3=False,
+        batch_size=args.batch_size,
+        device=device,
+        generation_kwargs=generation_kwargs,
+    )
+    member3 = _evaluate_local_checkpoint(
+        member3_checkpoint,
+        examples,
+        member3=True,
+        batch_size=args.batch_size,
+        device=device,
+        generation_kwargs=generation_kwargs,
+    )
+    verify_aligned_results(member2, member3)
+    _print_side_by_side(member2, member3)
     return {
         "member2": member2,
         "member3": member3,
