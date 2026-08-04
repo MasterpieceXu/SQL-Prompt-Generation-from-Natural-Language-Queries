@@ -1,0 +1,55 @@
+{
+  "metric": "sqlglot_validity_rate",
+  "definition": "A prediction is valid when it is non-empty, SQLGlot parses it as exactly one SQLite query, and the top-level expression is a query. The metric does not check schema names or execute SQL.",
+  "dialect": "sqlite",
+  "systems": {
+    "member2_baseline_greedy": {
+      "file": "results/baseline_predictions.csv",
+      "valid": 829,
+      "invalid": 111,
+      "total": 940,
+      "rate": 0.8819148936170212,
+      "percentage": 88.19148936170212,
+      "category_counts": {
+        "valid": 829,
+        "parse_error": 111
+      }
+    },
+    "member3_v2_beam_reranked": {
+      "file": "results/member3/improved_predictions.csv",
+      "valid": 822,
+      "invalid": 118,
+      "total": 940,
+      "rate": 0.874468085106383,
+      "percentage": 87.44680851063829,
+      "category_counts": {
+        "valid": 822,
+        "parse_error": 118
+      }
+    },
+    "member3_v3_greedy": {
+      "file": "results/member3/v3_full_run/improved_greedy_predictions.csv",
+      "valid": 836,
+      "invalid": 104,
+      "total": 940,
+      "rate": 0.8893617021276595,
+      "percentage": 88.93617021276596,
+      "category_counts": {
+        "valid": 836,
+        "parse_error": 104
+      }
+    },
+    "member3_v3_beam_reranked": {
+      "file": "results/member3/v3_full_run/improved_predictions.csv",
+      "valid": 849,
+      "invalid": 91,
+      "total": 940,
+      "rate": 0.9031914893617021,
+      "percentage": 90.31914893617021,
+      "category_counts": {
+        "valid": 849,
+        "parse_error": 91
+      }
+    }
+  }
+}
