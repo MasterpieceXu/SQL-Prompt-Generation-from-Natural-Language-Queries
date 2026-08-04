@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import argparse
+import gc
 import json
 import os
 import re
 import sqlite3
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any, Mapping
 
 import torch
+
+
+def raw_exact_match(target_sql: str | None, predicted_sql: str | None) -> bool:
+    return target_sql == predicted_sql
 
 
 def normalize_sql(sql: str | None) -> str:
@@ -113,6 +119,109 @@ def _sqlite_error_category(message: str) -> str:
     return "execution_error"
 
 
+_CREATE_TABLE_START = re.compile(
+    r"\bCREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+"
+    r"(?:[A-Za-z_]\w*|\"(?:[^\"]|\"\")+\"|`[^`]+`|\[[^\]]+\])"
+    r"(?:\s*\.\s*(?:[A-Za-z_]\w*|\"(?:[^\"]|\"\")+\"|`[^`]+`|\[[^\]]+\]))?"
+    r"\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _sqlite_compatible_schema(schema_sql: str) -> str:
+    code_positions = [False] * len(schema_sql)
+    index = 0
+    state = "code"
+    while index < len(schema_sql):
+        character = schema_sql[index]
+        following = schema_sql[index + 1] if index + 1 < len(schema_sql) else ""
+
+        if state == "line_comment":
+            if character in "\r\n":
+                state = "code"
+        elif state == "block_comment":
+            if character == "*" and following == "/":
+                state = "code"
+                index += 2
+                continue
+        elif state in {"single_quote", "double_quote", "backtick"}:
+            delimiter = {
+                "single_quote": "'",
+                "double_quote": '"',
+                "backtick": "`",
+            }[state]
+            if character == delimiter:
+                if following == delimiter:
+                    index += 2
+                    continue
+                state = "code"
+        elif state == "bracket":
+            if character == "]":
+                state = "code"
+        elif character == "-" and following == "-":
+            state = "line_comment"
+            index += 2
+            continue
+        elif character == "/" and following == "*":
+            state = "block_comment"
+            index += 2
+            continue
+        elif character in "'\"`[":
+            state = {
+                "'": "single_quote",
+                '"': "double_quote",
+                "`": "backtick",
+                "[": "bracket",
+            }[character]
+        else:
+            code_positions[index] = True
+        index += 1
+
+    if state not in {"code", "line_comment"}:
+        return schema_sql
+
+    removals: list[int] = []
+    for match in _CREATE_TABLE_START.finditer(schema_sql):
+        opening_index = match.end() - 1
+        if not code_positions[match.start()] or not code_positions[opening_index]:
+            continue
+
+        depth = 0
+        last_top_level_code: int | None = None
+        closing_index: int | None = None
+        for cursor in range(opening_index, len(schema_sql)):
+            if not code_positions[cursor]:
+                continue
+            character = schema_sql[cursor]
+            if character == "(":
+                if depth == 1:
+                    last_top_level_code = cursor
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    closing_index = cursor
+                    break
+                if depth == 1:
+                    last_top_level_code = cursor
+            elif depth == 1 and not character.isspace():
+                last_top_level_code = cursor
+
+        if closing_index is None:
+            return schema_sql
+        if last_top_level_code is not None and schema_sql[last_top_level_code] == ",":
+            removals.append(last_top_level_code)
+
+    if not removals:
+        return schema_sql
+    removal_set = set(removals)
+    return "".join(
+        character
+        for position, character in enumerate(schema_sql)
+        if position not in removal_set
+    )
+
+
 def check_sql_validity(
     predicted_sql: str | None,
     schema_sql: str | None = None,
@@ -160,7 +269,7 @@ def check_sql_validity(
                         else sqlite3.SQLITE_OK
                     )
                 )
-                connection.executescript(str(schema_sql))
+                connection.executescript(_sqlite_compatible_schema(str(schema_sql)))
             except sqlite3.Error as error:
                 return _validity_result(False, "schema_error", str(error))
 
@@ -642,6 +751,7 @@ def evaluate_model(
     records: list[dict[str, Any]] = []
     batch_count = 0
     example_index = 0
+    inference_seconds = 0.0
     metadata_fields = {"labels", "sample_id", "prompt", "target_sql"}
     if include_validity or include_error_analysis:
         metadata_fields.update({"schema_sql", "schema"})
@@ -650,7 +760,7 @@ def evaluate_model(
     device = torch.device(device)
     model.to(device)
     model.eval()
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch_number, batch in enumerate(data_loader):
             if max_batches is not None and batch_number >= max_batches:
                 break
@@ -664,16 +774,28 @@ def evaluate_model(
                 for key, value in batch.items()
                 if isinstance(value, torch.Tensor) and key not in metadata_fields
             }
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            inference_started_at = time.perf_counter()
             generated_ids = model.generate(
                 **model_inputs,
                 **generation_options,
             )
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            inference_seconds += time.perf_counter() - inference_started_at
+            decoded_ids = (
+                generated_ids.detach().cpu()
+                if isinstance(generated_ids, torch.Tensor)
+                else generated_ids
+            )
             predictions = list(
                 tokenizer.batch_decode(
-                    generated_ids,
+                    decoded_ids,
                     skip_special_tokens=True,
                 )
             )
+            del decoded_ids, generated_ids, model_inputs
 
             if "target_sql" in batch:
                 targets = _batch_values(
@@ -715,7 +837,9 @@ def evaluate_model(
                     "predicted_sql": predicted_sql,
                     "normalized_target_sql": normalized_target,
                     "normalized_predicted_sql": normalized_prediction,
+                    "raw_exact_match": raw_exact_match(target_sql, predicted_sql),
                     "exact_match": normalized_target == normalized_prediction,
+                    "normalized_exact_match": normalized_target == normalized_prediction,
                 }
                 for field_name, values in metadata.items():
                     record[field_name] = values[offset]
@@ -750,16 +874,36 @@ def evaluate_model(
 
     elapsed_seconds = time.perf_counter() - started_at
     correct = sum(record["exact_match"] for record in records)
+    raw_correct = sum(record["raw_exact_match"] for record in records)
     total = len(records)
     result = {
         "records": records,
+        "raw_correct": raw_correct,
+        "raw_accuracy": raw_correct / total if total else 0.0,
         "correct": correct,
         "total": total,
         "accuracy": correct / total if total else 0.0,
+        "normalized_correct": correct,
+        "normalized_accuracy": correct / total if total else 0.0,
+        "inference_seconds": inference_seconds,
+        "average_latency_seconds": inference_seconds / total if total else 0.0,
         "elapsed_seconds": elapsed_seconds,
         "examples_per_second": total / elapsed_seconds if elapsed_seconds else 0.0,
         "generation_kwargs": generation_options,
     }
+    if include_validity:
+        valid_count = sum(bool(record["sql_valid"]) for record in records)
+        validity_categories: dict[str, int] = {}
+        for record in records:
+            category = str(record["validity_category"])
+            validity_categories[category] = validity_categories.get(category, 0) + 1
+        result.update(
+            {
+                "sql_valid_count": valid_count,
+                "sql_validity_rate": valid_count / total if total else 0.0,
+                "validity_category_counts": validity_categories,
+            }
+        )
     if include_error_analysis:
         result["error_summary"] = summarize_error_analysis(records)
 
@@ -801,3 +945,311 @@ def error_analysis(predictions, references):
             for prediction, target in zip(predictions, references)
         ]
     )
+
+
+def validate_checkpoint_directory(path: str | Path, label: str) -> Path:
+    checkpoint = Path(path).expanduser()
+    if not checkpoint.exists():
+        raise FileNotFoundError(f"{label} checkpoint does not exist: {checkpoint}")
+    if not checkpoint.is_dir():
+        raise ValueError(f"{label} checkpoint is not a directory: {checkpoint}")
+
+    missing: list[str] = []
+    if not (checkpoint / "config.json").is_file():
+        missing.append("config.json")
+    weight_files = (
+        list(checkpoint.glob("*.safetensors"))
+        + list(checkpoint.glob("pytorch_model*.bin"))
+    )
+    if not weight_files:
+        missing.append("model weights (*.safetensors or pytorch_model*.bin)")
+    tokenizer_files = [
+        checkpoint / "tokenizer.json",
+        checkpoint / "spiece.model",
+        checkpoint / "sentencepiece.bpe.model",
+    ]
+    if not (checkpoint / "tokenizer_config.json").is_file() or not any(
+        candidate.is_file() for candidate in tokenizer_files
+    ):
+        missing.append("local tokenizer files")
+    if missing:
+        raise ValueError(
+            f"{label} checkpoint is incomplete ({checkpoint}): "
+            + ", ".join(missing)
+        )
+    return checkpoint.resolve()
+
+
+def prepare_ordered_test_examples(max_samples: int | None = None) -> list[dict[str, Any]]:
+    if max_samples is not None and max_samples < 1:
+        raise ValueError("max_samples must be at least 1")
+    if max_samples is not None and max_samples > 5:
+        raise ValueError("max_samples is smoke-test-only and cannot exceed 5")
+
+    from src.data_prepare import clean_dataset, load_raw_dataset, split_dataset
+    from src.improvement import extract_prompt_sections
+
+    clean = clean_dataset(load_raw_dataset())
+    _train, _validation, test = split_dataset(clean)
+    if max_samples is not None:
+        test = test.iloc[:max_samples]
+
+    examples: list[dict[str, Any]] = []
+    for sample_id, row in enumerate(test.itertuples(index=False)):
+        prompt = str(row.prompt)
+        examples.append(
+            {
+                "sample_id": sample_id,
+                "prompt": prompt,
+                "target_sql": str(row.sql),
+                "schema_sql": extract_prompt_sections(prompt).get("schema", ""),
+            }
+        )
+    if not examples:
+        raise ValueError("The unified test split contains no examples")
+    return examples
+
+
+def _iter_evaluation_batches(
+    examples: Sequence[Mapping[str, Any]],
+    tokenizer,
+    batch_size: int,
+    *,
+    member3_inputs: bool = False,
+) -> Iterator[dict[str, Any]]:
+    if batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    from src.config import MAX_INPUT_LENGTH
+
+    if member3_inputs:
+        from src.improvement import build_schema_aware_input
+
+    for start in range(0, len(examples), batch_size):
+        chunk = examples[start : start + batch_size]
+        prompts = [str(example["prompt"]) for example in chunk]
+        if member3_inputs:
+            prompts = [build_schema_aware_input(prompt) for prompt in prompts]
+        encoded = tokenizer(
+            prompts,
+            max_length=MAX_INPUT_LENGTH,
+            truncation=True,
+            padding=True,
+            return_tensors="pt",
+        )
+        batch = dict(encoded)
+        batch.update(
+            {
+                "sample_id": [example["sample_id"] for example in chunk],
+                "target_sql": [str(example["target_sql"]) for example in chunk],
+                "schema_sql": [str(example.get("schema_sql", "")) for example in chunk],
+            }
+        )
+        yield batch
+
+
+def build_evaluation_batches(
+    examples: Sequence[Mapping[str, Any]],
+    tokenizer,
+    batch_size: int,
+    *,
+    member3_inputs: bool = False,
+) -> list[dict[str, Any]]:
+    return list(
+        _iter_evaluation_batches(
+            examples,
+            tokenizer,
+            batch_size,
+            member3_inputs=member3_inputs,
+        )
+    )
+
+
+def verify_aligned_results(
+    member2_result: Mapping[str, Any],
+    member3_result: Mapping[str, Any],
+) -> None:
+    left = member2_result.get("records", [])
+    right = member3_result.get("records", [])
+    if len(left) != len(right):
+        raise ValueError(
+            "Member 2 and Member 3 prediction counts differ: "
+            f"{len(left)} != {len(right)}"
+        )
+    for index, (member2_record, member3_record) in enumerate(zip(left, right)):
+        for field in ("sample_id", "target_sql"):
+            if member2_record.get(field) != member3_record.get(field):
+                raise ValueError(
+                    f"Evaluation alignment failure at index {index}: {field} differs"
+                )
+
+
+def _resolve_device(requested: str) -> torch.device:
+    if requested == "auto":
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device(requested)
+    if device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"CUDA device requested but CUDA is unavailable: {requested}")
+    return device
+
+
+def _evaluate_local_checkpoint(
+    checkpoint: Path,
+    examples: Sequence[Mapping[str, Any]],
+    *,
+    member3: bool,
+    batch_size: int,
+    device: torch.device,
+    generation_kwargs: Mapping[str, Any],
+) -> dict[str, Any]:
+    if member3:
+        from src.improvement import load_improved_model
+
+        tokenizer, model = load_improved_model(str(checkpoint))
+    else:
+        from src.baseline import load_baseline_model
+
+        tokenizer, model = load_baseline_model(str(checkpoint))
+
+    try:
+        batches = _iter_evaluation_batches(
+            examples,
+            tokenizer,
+            batch_size,
+            member3_inputs=member3,
+        )
+        return evaluate_model(
+            model,
+            batches,
+            tokenizer,
+            device,
+            generation_kwargs=generation_kwargs,
+            include_validity=True,
+            include_error_analysis=True,
+        )
+    finally:
+        del model
+        del tokenizer
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+
+def _print_side_by_side(
+    member2: Mapping[str, Any],
+    member3: Mapping[str, Any],
+) -> None:
+    print("\nUnified Member 2 vs Member 3 evaluation")
+    print(f"{'Metric':<28} {'Member 2':>16} {'Member 3':>16}")
+    print("-" * 62)
+    rows = (
+        ("Examples", member2["total"], member3["total"]),
+        ("Raw Exact Match", f"{member2['raw_correct']}/{member2['total']} ({member2['raw_accuracy']:.4%})", f"{member3['raw_correct']}/{member3['total']} ({member3['raw_accuracy']:.4%})"),
+        ("Normalized Exact Match", f"{member2['normalized_correct']}/{member2['total']} ({member2['normalized_accuracy']:.4%})", f"{member3['normalized_correct']}/{member3['total']} ({member3['normalized_accuracy']:.4%})"),
+        ("SQL Validity Rate", f"{member2['sql_valid_count']}/{member2['total']} ({member2['sql_validity_rate']:.4%})", f"{member3['sql_valid_count']}/{member3['total']} ({member3['sql_validity_rate']:.4%})"),
+        ("Inference time (s)", f"{member2['inference_seconds']:.4f}", f"{member3['inference_seconds']:.4f}"),
+        ("Average latency (s)", f"{member2['average_latency_seconds']:.6f}", f"{member3['average_latency_seconds']:.6f}"),
+    )
+    for name, left, right in rows:
+        print(f"{name:<28} {str(left):>16} {str(right):>16}")
+    print("Execution Accuracy: unavailable (no populated databases or test-to-database mapping).")
+    for label, result in (("Member 2", member2), ("Member 3", member3)):
+        compact_errors = {
+            category: count
+            for category, count in result["error_summary"]["primary_category_counts"].items()
+            if count and category != "exact_match"
+        }
+        print(f"{label} primary error counts: {compact_errors}")
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Run the aligned, in-memory Member 2 versus Member 3 evaluation."
+    )
+    parser.add_argument("--member2-checkpoint", required=True)
+    parser.add_argument("--member3-checkpoint", required=True)
+    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--num-beams", type=int, default=1)
+    parser.add_argument("--max-new-tokens", type=int, default=256)
+    return parser
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    return build_argument_parser().parse_args(argv)
+
+
+def run_unified_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    if args.batch_size < 1:
+        raise ValueError("batch_size must be at least 1")
+    if args.max_samples is not None and args.max_samples < 1:
+        raise ValueError("max_samples must be at least 1")
+    if args.max_samples is not None and args.max_samples > 5:
+        raise ValueError("max_samples is smoke-test-only and cannot exceed 5")
+    if args.num_beams < 1:
+        raise ValueError("num_beams must be at least 1")
+    if args.max_new_tokens < 1:
+        raise ValueError("max_new_tokens must be at least 1")
+
+    member2_checkpoint = validate_checkpoint_directory(
+        args.member2_checkpoint, "Member 2"
+    )
+    member3_checkpoint = validate_checkpoint_directory(
+        args.member3_checkpoint, "Member 3"
+    )
+    device = _resolve_device(args.device)
+
+    from src.baseline import set_seed
+
+    set_seed(args.seed)
+    examples = prepare_ordered_test_examples(args.max_samples)
+    print(f"Member 2 checkpoint: {member2_checkpoint}")
+    print(f"Member 3 checkpoint: {member3_checkpoint}")
+    print(
+        "Evaluation configuration: "
+        f"examples={len(examples)}, batch_size={args.batch_size}, seed={args.seed}, "
+        f"device={device}, num_beams={args.num_beams}, "
+        f"max_new_tokens={args.max_new_tokens}"
+    )
+    generation_kwargs = {
+        "do_sample": False,
+        "num_beams": args.num_beams,
+        "max_new_tokens": args.max_new_tokens,
+    }
+    member2 = _evaluate_local_checkpoint(
+        member2_checkpoint,
+        examples,
+        member3=False,
+        batch_size=args.batch_size,
+        device=device,
+        generation_kwargs=generation_kwargs,
+    )
+    member3 = _evaluate_local_checkpoint(
+        member3_checkpoint,
+        examples,
+        member3=True,
+        batch_size=args.batch_size,
+        device=device,
+        generation_kwargs=generation_kwargs,
+    )
+    verify_aligned_results(member2, member3)
+    _print_side_by_side(member2, member3)
+    return {
+        "member2": member2,
+        "member3": member3,
+        "execution_accuracy": None,
+        "execution_accuracy_unavailable_reason": (
+            "Populated databases and a test-example-to-database mapping are unavailable."
+        ),
+    }
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    run_unified_evaluation(args)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
