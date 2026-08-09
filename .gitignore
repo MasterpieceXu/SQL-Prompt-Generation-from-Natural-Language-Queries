@@ -31,6 +31,7 @@ checkpoints/*
 
 # Member handoff archives are shared outside GitHub.
 results/member4_handoff.zip
+results/COMP9444_member3_v3_delivery.zip
 
 # Local presentation, pre notes, and generated LaTeX artifacts.
 /COMP9444_Text_to_SQL_UNSW_Template_ReadingVersion.pptx
