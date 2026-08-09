@@ -4,6 +4,25 @@ COMP9444 小组项目：自然语言到 SQL 查询生成。
 
 本项目目标是使用 `AI4DS/sql_generator_no_cot` 数据集，训练并评估能够将自然语言问题转换为有效 SQLite 查询语句的模型。
 
+## 最终提交说明
+
+最终分析以根目录下的单个 notebook 为主：
+
+- `COMP9444_SQL_Prompt_Generation_Final(1).ipynb`：最终 notebook，默认使用已保存的结果文件进行离线验证，不要求提交数据集或模型权重。
+- `COMP9444_Project_Report_TeamName.tex`：Summary Report 的 LaTeX 源文件。
+- `COMP9444_Project_Report_TeamName.pdf`：编译后的报告 PDF。
+- `final_page_numbers_fixed.pptx`：最终展示文件。
+
+Notebook 中的训练、数据下载和 checkpoint 重放选项默认关闭。提交版本主要复核已经生成的 prediction、training log 和 evaluation artifact；因此在没有原始数据、数据库实例或模型权重时，仍可以检查报告中的核心数字。
+
+如果本地结果文件完整，可以运行离线 demo：
+
+```bash
+python -m src.main demo
+```
+
+该命令复核 baseline 与改进系统的固定测试集比较。完整训练或重新下载数据则需要安装 `requirements.txt` 中的依赖，并准备相应数据和 checkpoint。
+
 ## 仓库结构
 
 ```text

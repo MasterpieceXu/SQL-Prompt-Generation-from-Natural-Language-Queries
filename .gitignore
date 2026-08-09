@@ -36,6 +36,19 @@ results/COMP9444_member3_v3_delivery.zip
 # Local presentation, pre notes, and generated LaTeX artifacts.
 /COMP9444_Text_to_SQL_UNSW_Template_ReadingVersion.pptx
 /pre_qa_bilingual.md
+
+# LaTeX compilation byproducts. Keep the report .tex and final .pdf files.
+*.aux
+*.log
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.toc
+*.lof
+*.lot
+
+# Legacy local report artifacts.
 /sql_evaluation_solution.aux
 /sql_evaluation_solution.log
 /sql_evaluation_solution.out
